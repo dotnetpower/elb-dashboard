@@ -145,12 +145,15 @@ def test_servicebus_periodic_ticks_expire_before_stale_backlog_replays() -> None
     schedule = celery_app.conf.beat_schedule
     drain = schedule["servicebus-drain-and-resubmit"]
     publish = schedule["servicebus-publish-transitions"]
+    dlq_responses = schedule["servicebus-reconcile-dead-letter-responses"]
 
     assert drain["options"]["queue"] == "servicebus"
     assert 0 < float(drain["options"]["expires"]) <= 15
     assert publish["options"]["queue"] == "servicebus"
     assert float(publish["schedule"]) >= 30
-    assert 0 < float(publish["options"]["expires"]) <= 90
+    assert 0 < float(publish["options"]["expires"]) < float(publish["schedule"])
+    assert dlq_responses["options"]["queue"] == "servicebus"
+    assert 0 < float(dlq_responses["options"]["expires"]) < float(dlq_responses["schedule"])
 
 
 def test_servicebus_periodic_tasks_have_execution_deadlines() -> None:
@@ -159,11 +162,30 @@ def test_servicebus_periodic_tasks_have_execution_deadlines() -> None:
         "api.tasks.servicebus.publish_transitions": (50, 60),
         "api.tasks.servicebus.emit_service_bus_health": (45, 60),
         "api.tasks.servicebus.reconcile_dead_letter_responses": (90, 120),
+        "api.tasks.servicebus.dlq_cleanup": (120, 150),
     }
 
     for task_name, limits in expected.items():
         task = celery_app.tasks[task_name]
         assert (task.soft_time_limit, task.time_limit) == limits
+
+
+def test_servicebus_worker_prefetches_one_fresh_tick() -> None:
+    command = run_celery_workers._worker_command(
+        "worker-servicebus",
+        "servicebus",
+        "1",
+    )
+
+    option = command.index("--prefetch-multiplier")
+    assert command[option + 1] == "1"
+
+
+def test_servicebus_dlq_cleanup_tick_is_bounded() -> None:
+    entry = celery_app.conf.beat_schedule["servicebus-dlq-cleanup"]
+
+    assert entry["options"]["queue"] == "servicebus"
+    assert 0 < float(entry["options"]["expires"]) < float(entry["schedule"])
 
 
 def test_servicebus_health_tick_is_bounded_and_isolated() -> None:

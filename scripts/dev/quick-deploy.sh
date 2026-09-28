@@ -1203,10 +1203,17 @@ fi
   # `deploy all latest-main` is a silent no-op whenever the active revision
   # already references :latest-main (see resolve_image_digest).
   if $NO_BUILD; then
+    # A pre-built tag still needs one ACR data-plane lookup to resolve its
+    # immutable digest. Steady-state ACR is private, so take the same bounded
+    # access lease as a build and restore it before PATCHing the Container App.
+    trap 'acr_restore_build_access "$ACR_NAME"' EXIT
+    acr_ensure_build_access "$ACR_NAME"
     ts "==> Resolving pre-built image tags to digests for a deterministic revision roll"
     NEW_API="$(resolve_image_digest "$NEW_API")"
     NEW_FRONTEND="$(resolve_image_digest "$NEW_FRONTEND")"
     NEW_TERMINAL="$(resolve_image_digest "$NEW_TERMINAL")"
+    acr_restore_build_access "$ACR_NAME"
+    trap - EXIT
   fi
   ts "      api/worker/beat -> $NEW_API"
   ts "      frontend        -> $NEW_FRONTEND"
@@ -1468,7 +1475,11 @@ esac
 # resolve_image_digest in the helpers block). A newly built image was resolved
 # before private ACR restoration; --no-build still resolves here.
 if $NO_BUILD; then
+  trap 'acr_restore_build_access "$ACR_NAME"' EXIT
+  acr_ensure_build_access "$ACR_NAME"
   NEW_IMAGE="$(resolve_image_digest "$NEW_IMAGE")"
+  acr_restore_build_access "$ACR_NAME"
+  trap - EXIT
 fi
 
 for tgt in "${TARGETS[@]}"; do

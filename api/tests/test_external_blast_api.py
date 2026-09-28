@@ -1668,9 +1668,7 @@ def test_external_xml_facade_rejects_sequence_diversity(monkeypatch):
         json={
             "query_fasta": ">q1\nACGT\n",
             "db": "core_nt",
-            "blast_options": {
-                "result_selection_policy": "sequence_diversity"
-            },
+            "blast_options": {"result_selection_policy": "sequence_diversity"},
         },
     )
 
@@ -3234,8 +3232,11 @@ def test_sync_external_backfills_runtime_id_without_status_change(monkeypatch):
 def test_sync_external_does_not_overwrite_conflicting_runtime_id(monkeypatch, caplog):
     from api.routes import _blast_shared as shared
     from api.services import state_repo
+    from api.services.blast import external_config
 
     updates: list[dict[str, object]] = []
+    evidence_backfills: list[dict[str, object]] = []
+    cached_stats: list[dict[str, object]] = []
 
     class FakeExisting:
         job_id = "runtime-conflict-1"
@@ -3263,21 +3264,37 @@ def test_sync_external_does_not_overwrite_conflicting_runtime_id(monkeypatch, ca
         def update(self, _job_id, **kwargs):
             updates.append(kwargs)
 
+        def backfill_payload_section(self, _job_id, _section, values):
+            evidence_backfills.append(dict(values))
+            return True
+
     monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
     monkeypatch.setattr(state_repo, "JobState", object)
+    monkeypatch.setattr(
+        external_config,
+        "remember_sibling_stats",
+        lambda _job_id, payload: cached_stats.append(dict(payload)),
+    )
 
+    external_row = {
+        "job_id": "runtime-conflict-1",
+        "status": "completed",
+        "phase": "completed",
+        "elb_job_id": "job-22222222bbbbbbbb22222222bbbbbbbb",
+        "started_at": "2026-09-28T01:00:00Z",
+        "completed_at": "2026-09-28T01:05:00Z",
+    }
     shared._sync_external_jobs_to_table(
-        [
-            {
-                "job_id": "runtime-conflict-1",
-                "status": "running",
-                "elb_job_id": "job-22222222bbbbbbbb22222222bbbbbbbb",
-            }
-        ],
+        [external_row],
         caller_oid="oid-1",
     )
 
     assert updates == []
+    assert evidence_backfills == []
+    assert cached_stats == []
+    assert external_row["status"] == "running"
+    assert external_row["phase"] == "running"
+    assert external_row["elb_job_id"] == "job-11111111aaaaaaaa11111111aaaaaaaa"
     assert "runtime identity conflict" in caplog.text
 
 
@@ -5456,6 +5473,32 @@ def test_external_blast_ready_inflight_serialises_concurrent_callers(
     assert call_count["n"] == 1, f"expected single upstream call, saw {call_count['n']}"
     assert len(results) == 8
     assert all(r == payload for r in results)
+
+
+def test_external_blast_ready_follower_fallback_does_not_release_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import external_blast
+
+    external_blast.reset_ready_cache()
+    key = external_blast._ready_cache_key("http://openapi", "t")
+    is_leader, event = external_blast._ready_inflight_acquire(key)
+    assert is_leader is True
+    monkeypatch.setattr(external_blast, "_READY_INFLIGHT_MAX_WAIT_ROUNDS", 0)
+    monkeypatch.setattr(
+        external_blast,
+        "_ready_probe_upstream",
+        lambda *_args, **_kwargs: {"ready": True, "fallback": True},
+    )
+
+    try:
+        result = external_blast.ready(base_url="http://openapi", api_token="t")
+
+        assert result == {"ready": True, "fallback": True}
+        assert external_blast._READY_INFLIGHT[key] is event
+        assert event.is_set() is False
+    finally:
+        external_blast._ready_inflight_release(key)
 
 
 def test_external_blast_ready_cache_hit_logs_event(monkeypatch, caplog) -> None:

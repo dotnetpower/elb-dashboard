@@ -22,6 +22,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn
 
+from billiard.exceptions import SoftTimeLimitExceeded
 from celery import shared_task
 
 import api.tasks.storage as _facade
@@ -104,6 +105,8 @@ def _terminal_failure(
                 run_id=run_id,
                 error_code=error_code,
             )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             LOGGER.warning(
                 "oracle automation failure state skipped run_id=%s reason=%s",
@@ -180,6 +183,8 @@ def _failed_job_message(
             failed_job,
             tail_lines=_FAILED_JOB_LOG_TAIL_LINES,
         )
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         LOGGER.warning(
             "oracle failed Job logs unavailable run_id=%s job=%s reason=%s",
@@ -272,6 +277,8 @@ def build_db_order_oracle(
                     run_id=run_id,
                     require_current_run=automatic,
                 )
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 LOGGER.warning(
                     "oracle adopted success state skipped run_id=%s reason=%s",
@@ -279,9 +286,7 @@ def build_db_order_oracle(
                     type(exc).__name__,
                 )
                 if automatic:
-                    raise OracleTaskFailed(
-                        "oracle published automation recovery pending"
-                    ) from exc
+                    raise OracleTaskFailed("oracle published automation recovery pending") from exc
         if owns_active:
             try:
                 release_oracle_active(
@@ -289,6 +294,8 @@ def build_db_order_oracle(
                     db_name=db_name,
                     owner_operation_id=owner_operation_id,
                 )
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 LOGGER.warning(
                     "oracle published active cleanup skipped run_id=%s reason=%s",
@@ -419,6 +426,8 @@ def build_db_order_oracle(
             cluster_name,
             list(plan.jobs),
         )
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         _cleanup_jobs()
         _terminal_failure(
@@ -473,6 +482,8 @@ def build_db_order_oracle(
             progress = classify_oracle_jobs(job_names, jobs)
             consecutive_k8s_errors = 0
             first_k8s_error_at = None
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             consecutive_k8s_errors += 1
             error_time = time.monotonic()
@@ -549,6 +560,8 @@ def build_db_order_oracle(
             expected_paths=expected_paths,
             part_prefix=part_prefix,
         )
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         _cleanup_jobs()
         _terminal_failure(
@@ -647,6 +660,8 @@ def build_db_order_oracle(
             run_id=run_id,
             require_current_run=automatic,
         )
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         LOGGER.warning(
             "oracle automation success state skipped run_id=%s reason=%s",
@@ -661,6 +676,8 @@ def build_db_order_oracle(
             db_name=db_name,
             owner_operation_id=owner_operation_id,
         )
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         LOGGER.warning(
             "oracle published active release skipped run_id=%s reason=%s",

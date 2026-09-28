@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-LIVE_OUTPUT_SNIPPET_CHARS = 8000
+LIVE_OUTPUT_SNIPPET_CHARS = 2000
 PROGRESS_STEP_ORDER = (
     "preparing",
     "warming_up",

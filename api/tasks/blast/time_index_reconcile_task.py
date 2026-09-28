@@ -13,11 +13,13 @@ Key entry points:
      ``name="api.tasks.blast.reconcile_time_index"``, scheduled by Celery beat).
 Risky contracts: Idempotent — re-running derives the SAME immutable RowKeys per
 job, and existing rows are never rewritten. A token-owned Redis lock prevents
-old/new revisions from running the full scan together; its TTL exceeds the hard
-task limit. No-op (returns early) unless ``JOBSTATE_TIME_INDEX_ENABLED`` is set,
-so the task is free to leave scheduled on every deployment (charter §12a Rule 4:
-new behaviour default-OFF). Celery soft limits and repair failures must escape
-so monitoring records FAILURE instead of a false SUCCESS.
+old/new revisions from running the scan together; its TTL exceeds the hard task
+limit. The periodic path advances a durable source cursor only after a bounded
+batch succeeds, so interruption replays work rather than skipping rows. No-op
+(returns early) unless ``JOBSTATE_TIME_INDEX_ENABLED`` is set, so the task is
+free to leave scheduled on every deployment (charter §12a Rule 4: new behaviour
+default-OFF). Celery soft limits and repair failures must escape so monitoring
+records FAILURE instead of a false SUCCESS.
 Public task name must stay ``api.tasks.blast.reconcile_time_index`` (referenced
 from ``api/celery_app.py`` beat schedule).
 Validation: ``uv run pytest -q api/tests/test_jobstate_time_index.py``.
@@ -26,6 +28,7 @@ Validation: ``uv run pytest -q api/tests/test_jobstate_time_index.py``.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from typing import Any
 
@@ -34,9 +37,18 @@ from celery import shared_task
 
 LOGGER = logging.getLogger(__name__)
 _RECONCILE_LOCK_KEY = "blast:jobstate-time-index:reconcile-lock"
-_RECONCILE_SOFT_TIME_LIMIT_SECONDS = 3000
-_RECONCILE_HARD_TIME_LIMIT_SECONDS = 3200
-_RECONCILE_LOCK_TTL_SECONDS = 3300
+_RECONCILE_CURSOR_KEY = "blast:jobstate-time-index:reconcile-cursor"
+_RECONCILE_BATCH_ROWS_DEFAULT = 1000
+_RECONCILE_SOFT_TIME_LIMIT_SECONDS = 180
+_RECONCILE_HARD_TIME_LIMIT_SECONDS = 210
+_RECONCILE_LOCK_TTL_SECONDS = 240
+if not (
+    0
+    < _RECONCILE_SOFT_TIME_LIMIT_SECONDS
+    < _RECONCILE_HARD_TIME_LIMIT_SECONDS
+    < _RECONCILE_LOCK_TTL_SECONDS
+):
+    raise ValueError("time-index reconcile limits must satisfy soft < hard < lock TTL")
 _RECONCILE_RELEASE_LUA = """
 if redis.call('get', KEYS[1]) == ARGV[1] then
     return redis.call('del', KEYS[1])
@@ -45,6 +57,54 @@ return 0
 """
 
 __all__ = ("reconcile_time_index",)
+
+
+def _batch_rows() -> int:
+    raw = os.environ.get("JOBSTATE_TIME_INDEX_RECONCILE_BATCH_ROWS", "")
+    try:
+        value = int(raw) if raw else _RECONCILE_BATCH_ROWS_DEFAULT
+    except ValueError:
+        LOGGER.warning(
+            "invalid JOBSTATE_TIME_INDEX_RECONCILE_BATCH_ROWS=%r; defaulting to %d",
+            raw,
+            _RECONCILE_BATCH_ROWS_DEFAULT,
+        )
+        value = _RECONCILE_BATCH_ROWS_DEFAULT
+    return max(100, min(value, 1000))
+
+
+def _load_reconcile_cursor() -> str:
+    from api.services.state.singletons import load_singleton_strict
+
+    try:
+        payload = load_singleton_strict(_RECONCILE_CURSOR_KEY) or {}
+    except ValueError as exc:
+        # A malformed singleton is not a transient Storage outage. Restarting
+        # from the beginning is safe because index creation is idempotent; a
+        # hard failure here would wedge automatic repair on every future tick.
+        LOGGER.warning("time-index reconcile cursor reset reason=%s", type(exc).__name__)
+        return ""
+    cursor = str(payload.get("partition_key") or "")
+    if len(cursor) > 1024 or any(ord(char) < 32 for char in cursor):
+        LOGGER.warning("time-index reconcile cursor reset reason=malformed_value")
+        return ""
+    return cursor
+
+
+def _save_reconcile_cursor(partition_key: str) -> None:
+    from api.services.state.singletons import save_singleton
+
+    if (
+        not isinstance(partition_key, str)
+        or len(partition_key) > 1024
+        or any(ord(char) < 32 for char in partition_key)
+    ):
+        raise ValueError("time-index reconcile next cursor is malformed")
+    if not save_singleton(
+        _RECONCILE_CURSOR_KEY,
+        {"partition_key": partition_key},
+    ):
+        raise RuntimeError("time-index reconcile cursor could not be persisted")
 
 
 def _acquire_reconcile_lock() -> tuple[tuple[Any, str] | None, str]:
@@ -101,7 +161,7 @@ def reconcile_time_index(self: Any) -> dict[str, Any]:
 
     This periodic maintenance task intentionally acknowledges on start: losing
     one pass to worker termination is safe because existing writes are
-    idempotent and the next hourly tick resumes the same missing-row repair.
+    idempotent and the next scheduled tick resumes the same missing-row repair.
     Submit and execution tasks retain the app-level late-ack contract.
 
     No-op when ``JOBSTATE_TIME_INDEX_ENABLED`` is off: with the flag off no index
@@ -122,7 +182,13 @@ def reconcile_time_index(self: Any) -> dict[str, Any]:
         from api.services.state.repository import get_state_repo
 
         repo = get_state_repo()
-        scanned, written = repo.reconcile_time_index()
+        cursor = _load_reconcile_cursor()
+        batch_limit = _batch_rows()
+        batch = repo.reconcile_time_index_batch(
+            start_after_partition_key=cursor,
+            max_rows=batch_limit,
+        )
+        _save_reconcile_cursor(batch.next_partition_key)
     except SoftTimeLimitExceeded:
         raise
     except Exception as exc:
@@ -131,5 +197,16 @@ def reconcile_time_index(self: Any) -> dict[str, Any]:
     finally:
         _release_reconcile_lock(lock_handle)
 
-    LOGGER.info("reconcile_time_index: scanned=%d written=%d", scanned, written)
-    return {"scanned": scanned, "written": written}
+    LOGGER.info(
+        "reconcile_time_index: scanned=%d written=%d cycle_complete=%s batch_limit=%d",
+        batch.scanned,
+        batch.written,
+        batch.cycle_complete,
+        batch_limit,
+    )
+    return {
+        "scanned": batch.scanned,
+        "written": batch.written,
+        "cycle_complete": batch.cycle_complete,
+        "batch_limit": batch_limit,
+    }

@@ -804,6 +804,42 @@ def test_jobs_list_cursor_page_continues_without_overlap(monkeypatch) -> None:
     assert body["page"]["next_cursor"] == encode_cursor(row_key(rows[3].created_at, "job-3"))
 
 
+def test_jobs_list_equal_timestamps_use_cursor_tiebreaker(monkeypatch) -> None:
+    from api.routes.blast import jobs as jobs_mod
+    from api.services.state.time_index import encode_cursor, row_key
+
+    _client, _calls, rows = _cursor_route_setup(monkeypatch, row_count=2)
+    tied_at = "2026-06-01T00:00:00Z"
+    for row in rows:
+        row.created_at = tied_at
+    monkeypatch.setattr(
+        jobs_mod,
+        "collect_and_sync_external_jobs",
+        lambda **_kwargs: SimpleNamespace(
+            rows=[{"job_id": "aaa", "status": "completed", "created_at": tied_at}],
+            tombstoned_ids=set(),
+            any_target_ok=True,
+            target_failures=[],
+        ),
+    )
+    monkeypatch.setattr(jobs_mod, "_external_to_blast_job", lambda row: dict(row))
+
+    body = jobs_mod._compute_blast_jobs_response(
+        caller_oid="00000000-0000-0000-0000-000000000000",
+        tenant_id="tenant-test",
+        limit=2,
+        subscription_id="",
+        resource_group="",
+        cluster_name="",
+        shared_visibility=False,
+        request_id="request-test",
+        skip_enrichment=False,
+    )
+
+    assert [job["job_id"] for job in body["jobs"]] == ["aaa", "job-0"]
+    assert body["page"]["next_cursor"] == encode_cursor(row_key(tied_at, "job-0"))
+
+
 def test_jobs_list_no_next_cursor_when_index_disabled(monkeypatch) -> None:
     """With the time-index flag OFF the route never emits ``next_cursor`` even
     when ``has_more`` is true — pagination stays first-page-only."""
@@ -1142,6 +1178,52 @@ def test_blast_job_cancel_external_routes_to_sibling_delete(monkeypatch) -> None
     assert body["openapi_job_id"] == "abc123"
     assert deleted["job_id"] == "abc123"
     assert repo_cls.updates == [{"job_id": "abc123", "status": "cancelled", "phase": "cancelled"}]
+
+
+def test_blast_job_cancel_external_uses_durable_scope_columns(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    state = SimpleNamespace(
+        job_id="abc123",
+        task_id="task-x",
+        type="blast",
+        owner_oid="",
+        owner_upn="api",
+        status="running",
+        phase="running",
+        created_at="2026-06-01T00:00:00Z",
+        updated_at="2026-06-01T00:01:00Z",
+        error_code=None,
+        parent_job_id=None,
+        payload={"external": {"job_id": "abc123"}},
+        subscription_id="sub-state",
+        resource_group="rg-state",
+        cluster_name="cluster-state",
+        storage_account="storage-state",
+    )
+    repo_cls = _cancel_repo(state)
+    repo_cls.updates = []
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", repo_cls)
+    observed: list[tuple[str, str, str]] = []
+
+    def fake_kwargs(subscription_id: str, resource_group: str, cluster_name: str):
+        observed.append((subscription_id, resource_group, cluster_name))
+        return {"base_url": "https://openapi.test"}
+
+    monkeypatch.setattr(
+        "api.routes.blast._openapi_client_kwargs_from_cluster",
+        fake_kwargs,
+    )
+    monkeypatch.setattr(
+        "api.services.external_blast.delete_job",
+        lambda job_id, **_kwargs: {"job_id": job_id, "status": "deleted"},
+    )
+
+    from api.main import app
+
+    response = TestClient(app).post("/api/blast/jobs/abc123/cancel", json={})
+
+    assert response.status_code == 200
+    assert observed == [("sub-state", "rg-state", "cluster-state")]
 
 
 def test_blast_job_cancel_dashboard_uses_k8s_task(monkeypatch) -> None:

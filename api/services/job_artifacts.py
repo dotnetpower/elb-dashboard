@@ -350,10 +350,46 @@ def read_json_artifact(
                 type(exc).__name__,
             )
         return None
+    except (gzip.BadGzipFile, EOFError, OSError) as exc:
+        LOGGER.warning(
+            "invalid gzip artifact job_id=%s type=%s reason=%s",
+            job_id,
+            artifact_type,
+            type(exc).__name__,
+        )
+        try:
+            upsert_artifact_state(
+                job_id,
+                artifact_type,
+                status="failed",
+                error_code="invalid_gzip",
+            )
+        except Exception as state_exc:  # best-effort — never raise from a read path
+            LOGGER.warning(
+                "failed to mark invalid gzip artifact failed job_id=%s type=%s: %s",
+                job_id,
+                artifact_type,
+                type(state_exc).__name__,
+            )
+        return None
     try:
         return cast(dict[str, Any], json.loads(text))
     except json.JSONDecodeError:
         LOGGER.warning("invalid JSON artifact job_id=%s type=%s", job_id, artifact_type)
+        try:
+            upsert_artifact_state(
+                job_id,
+                artifact_type,
+                status="failed",
+                error_code="invalid_json",
+            )
+        except Exception as exc:  # best-effort — never raise from a read path
+            LOGGER.warning(
+                "failed to mark invalid artifact failed job_id=%s type=%s: %s",
+                job_id,
+                artifact_type,
+                type(exc).__name__,
+            )
         return None
 
 

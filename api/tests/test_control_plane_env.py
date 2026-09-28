@@ -90,6 +90,45 @@ def test_postprovision_validates_each_platform_network_surface() -> None:
     assert precheck < build_open < final_restore < final_check
 
 
+def test_postprovision_preserves_deployment_feature_overrides() -> None:
+    script = _POSTPROVISION_PATH.read_text(encoding="utf-8")
+
+    assert '. "$REPO_ROOT/scripts/dev/lib-env.sh"' in script
+    assert "load_azd_env" in script
+    assert script.index("load_azd_env") < script.index("REQUIRED_VARS=(")
+    assert 'serviceBusEnabled="$SERVICEBUS_ENABLED_VAL"' in script
+    assert 'storageDateLayoutEnabled="$STORAGE_DATE_LAYOUT_ENABLED_VAL"' in script
+    assert 'prepareDbNcbiDirectEnabled="$PREPARE_DB_NCBI_DIRECT_ENABLED_VAL"' in script
+
+
+def test_no_build_deploy_resolves_digests_inside_acr_access_lease() -> None:
+    script = _QUICK_DEPLOY_PATH.read_text(encoding="utf-8")
+    all_no_build = script.index("if $NO_BUILD; then\n    # A pre-built tag")
+    all_trap = script.index("trap 'acr_restore_build_access", all_no_build)
+    all_open = script.index('acr_ensure_build_access "$ACR_NAME"', all_no_build)
+    all_resolve = script.index('NEW_API="$(resolve_image_digest', all_open)
+    all_restore = script.index('acr_restore_build_access "$ACR_NAME"', all_resolve)
+    assert all_trap < all_open < all_resolve < all_restore
+
+    single_no_build = script.index("if $NO_BUILD; then", all_restore)
+    single_trap = script.index("trap 'acr_restore_build_access", single_no_build)
+    single_open = script.index('acr_ensure_build_access "$ACR_NAME"', single_no_build)
+    single_resolve = script.index('NEW_IMAGE="$(resolve_image_digest', single_open)
+    single_restore = script.index('acr_restore_build_access "$ACR_NAME"', single_resolve)
+    assert single_trap < single_open < single_resolve < single_restore
+
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    assert "az acr repository show-tags" not in workflow
+
+
+def test_container_app_readiness_probes_allow_transient_scheduler_delay() -> None:
+    bicep = _BICEP_PATH.read_text(encoding="utf-8")
+
+    assert bicep.count("type: 'Readiness'") == 2
+    assert "timeoutSeconds: 3" not in bicep
+    assert bicep.count("timeoutSeconds: 5") >= 4
+
+
 def test_postprovision_probes_structure_and_deployed_uami_runtime() -> None:
     """Private data-plane checks must execute inside the deployed API VNet."""
     script = _POSTPROVISION_PATH.read_text(encoding="utf-8")
@@ -102,9 +141,9 @@ def test_postprovision_probes_structure_and_deployed_uami_runtime() -> None:
     assert 'RUNTIME_PROBE_SCRIPT="$REPO_ROOT/scripts/dev/probe-deployed-capabilities.sh"' in script
     assert 'bash "$RUNTIME_PROBE_SCRIPT"' in script
 
-    runtime_probe = (
-        _REPO_ROOT / "scripts" / "dev" / "probe-deployed-capabilities.sh"
-    ).read_text(encoding="utf-8")
+    runtime_probe = (_REPO_ROOT / "scripts" / "dev" / "probe-deployed-capabilities.sh").read_text(
+        encoding="utf-8"
+    )
     for route in (
         "/api/health/ready",
         "/api/health/azure-discovery",

@@ -511,14 +511,17 @@ def test_register_external_job_records_runtime_identity_conflict(
         _WEBHOOK_PATH,
         json={
             "job_id": "job-1",
-            "event": "running",
-            "status": "running",
+            "event": "failed",
+            "status": "failed",
             "elb_job_id": "job-22222222222222222222222222222222",
         },
         headers=_headers(),
     )
 
     assert response.status_code == 202
+    assert response.json()["synced"] is False
+    assert response.json()["reason"] == "runtime_identity_conflict"
+    assert fake_repo.rows["job-1"].status == "running"
     assert fake_repo.rows["job-1"].elastic_blast_job_id == ("job-11111111111111111111111111111111")
     assert fake_repo.history == [
         {

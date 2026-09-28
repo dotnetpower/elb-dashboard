@@ -58,6 +58,23 @@ def _resolve_live_metrics_enabled(role: str) -> bool:
     return role == "api"
 
 
+def _resolve_metrics_disabled(role: str) -> bool:
+    """Disable periodic OTel metrics for background prefork roles by default.
+
+    Worker and beat resource metrics already flow through the bounded cgroup
+    reporter. Keeping one periodic Azure Monitor metrics exporter per prefork
+    process added duplicate envelopes and a long-lived MainProcess exporter
+    emitted repeated non-retryable transport failures. Traces and ``api.*``
+    logs remain enabled. Operators can explicitly restore background metrics
+    for diagnostics without changing the API role.
+    """
+    if _bool_env("AZURE_MONITOR_DISABLE_METRICS") is True:
+        return True
+    if _bool_env("AZURE_MONITOR_ENABLE_BACKGROUND_METRICS") is True:
+        return False
+    return role in {"worker", "beat"}
+
+
 def _resource_attributes(role: str) -> dict[str, str]:
     attributes = {
         "service.name": f"elb-{role}",
@@ -158,6 +175,12 @@ def init_telemetry(role: str, app: FastAPI | None = None) -> bool:
                 # Root logging would also capture Azure SDK/exporter internals
                 # and can create noisy feedback loops.
                 "logger_name": "api",
+                # The api process keeps standard OTel metrics. Background
+                # sidecars already publish cgroup metrics and run multiple
+                # prefork processes, so their periodic metric exporters are
+                # redundant and were the source of once-per-minute transport
+                # failures in the long-lived worker parent.
+                "disable_metrics": _resolve_metrics_disabled(role),
                 # Live Metrics (QuickPulse) streams per-second request / failure
                 # / dependency counters to the App Insights blade so an
                 # operator can correlate a dashboard click with backend

@@ -1108,6 +1108,7 @@ def drain_dead_letter_messages(
     handler: Callable[[ParsedMessage], MessageAction],
     *,
     max_messages: int,
+    deadline_monotonic: float | None = None,
 ) -> DrainStats:
     """Process a bounded DLQ batch with explicit backup/response settlement.
 
@@ -1129,6 +1130,8 @@ def drain_dead_letter_messages(
         ) as receiver,
     ):
         while budget > 0:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                break
             batch = receiver.receive_messages(
                 max_message_count=min(budget, 16),
                 max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
@@ -1155,7 +1158,17 @@ def drain_dead_letter_messages(
                         exc_info=True,
                     )
                 claimed.append((message, parsed))
-            actions = [_safe_drain_handler(handler, parsed) for _message, parsed in claimed]
+            actions: list[MessageAction] = []
+            deadline_exhausted = False
+            for _message, parsed in claimed:
+                if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                    # The receiver already owns a peek lock for this batch.
+                    # Explicitly abandon untouched messages so the next tick
+                    # can resume immediately instead of waiting for lock expiry.
+                    actions.append(MessageAction.ABANDON)
+                    deadline_exhausted = True
+                    continue
+                actions.append(_safe_drain_handler(handler, parsed))
             for (message, parsed), action in zip(claimed, actions, strict=True):
                 # RETRY/DEAD_LETTER have no meaning inside the DLQ; preserve the
                 # message unless the caller explicitly confirms COMPLETE.
@@ -1165,7 +1178,7 @@ def drain_dead_letter_messages(
                     else MessageAction.ABANDON
                 )
                 _settle(receiver, None, message, parsed, disposition, stats)
-            if any(action != MessageAction.COMPLETE for action in actions):
+            if deadline_exhausted or any(action != MessageAction.COMPLETE for action in actions):
                 break
     return stats
 
@@ -1203,9 +1216,9 @@ def _retry_message(parsed: ParsedMessage) -> ServiceBusMessage:
         first_enqueued_at = _now().isoformat(timespec="seconds")
     correlation_id = str(parsed.correlation_id or parsed.message_id or "")
     raw_body = parsed.raw_body or json.dumps(parsed.body, default=str)
-    retry_message_id = "retry-" + hashlib.sha256(
-        f"{correlation_id}:{next_attempt}".encode()
-    ).hexdigest()[:40]
+    retry_message_id = (
+        "retry-" + hashlib.sha256(f"{correlation_id}:{next_attempt}".encode()).hexdigest()[:40]
+    )
     properties = dict(parsed.application_properties)
     properties.update(
         {

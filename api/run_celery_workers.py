@@ -89,6 +89,11 @@ def _worker_command(
         "--concurrency",
         concurrency,
     ]
+    if name == "worker-servicebus":
+        # Fresh 10/30-second drain and transition ticks outrank stale
+        # maintenance work. Reserving four tasks in the only servicebus child
+        # lets old publish/DLQ work hide a fresh drain tick until it expires.
+        command.extend(["--prefetch-multiplier", "1"])
     # billiard only honours --max-memory-per-child on the prefork pool.
     if pool == "prefork" and max_memory_per_child_kb and max_memory_per_child_kb != "0":
         kb = _validated(max_memory_per_child_kb, _MAX_MEMORY_RE, "max-memory-per-child")

@@ -19,6 +19,10 @@ import json
 from typing import ClassVar
 
 from api.services.state import repository as state_repo
+from api.services.state.job_state import (
+    JobStatePayloadTooLarge,
+    serialise_jobstate_payload,
+)
 from api.services.state.repository import JobState, JobStateRepository
 from azure.core import MatchConditions
 from azure.core.exceptions import ResourceModifiedError, ResourceNotFoundError
@@ -75,6 +79,41 @@ def test_job_state_round_trips_parent_job_id() -> None:
     assert entity["parent_job_id"] == "parent-1"
     assert restored.parent_job_id == "parent-1"
     assert restored.payload == {"group_id": "qg1"}
+
+
+def test_jobstate_payload_compacts_progress_text_within_table_budget() -> None:
+    payload = {
+        "config_snapshot": {"program": "blastn", "db": "core_nt"},
+        "_progress": {
+            "phase": "staging_db",
+            "status": "running",
+            "steps": {
+                phase: {
+                    "phase": phase,
+                    "status": "completed",
+                    "last_output": f"{phase}:" + ("x" * 8000),
+                    "output": f"{phase}:" + ("y" * 8000),
+                }
+                for phase in (
+                    "preparing",
+                    "warming_up",
+                    "configuring",
+                    "staging_db",
+                    "submitting",
+                    "running",
+                )
+            },
+        },
+    }
+
+    encoded, compacted = serialise_jobstate_payload(payload)
+    restored = json.loads(encoded)
+
+    assert compacted is True
+    assert len(encoded.encode("utf-16-le")) <= 60 * 1024
+    assert restored["config_snapshot"] == payload["config_snapshot"]
+    assert restored["_progress"]["phase"] == "staging_db"
+    assert restored["_progress"]["payload_compacted"] is True
 
 
 def test_job_state_round_trips_owner_upn() -> None:
@@ -335,8 +374,7 @@ def test_list_for_scope_is_owner_agnostic_but_requires_scope(monkeypatch) -> Non
     # caller is filtering from a dashboard whose workspace RG is different
     # (e.g. rg-elb-dashboard). See the docstring on list_for_scope.
     assert queries == [
-        "status ne 'deleted' and subscription_id eq 'sub-1' "
-        "and cluster_name eq 'elb-cluster-01'"
+        "status ne 'deleted' and subscription_id eq 'sub-1' and cluster_name eq 'elb-cluster-01'"
     ]
 
 
@@ -392,8 +430,7 @@ def test_list_for_scope_drops_rg_when_cluster_name_set(monkeypatch) -> None:
 
     assert [row.job_id for row in scoped] == ["22cf0dae-a402-482e-9208-f07fe922957f"]
     assert queries == [
-        "status ne 'deleted' and subscription_id eq 'sub-1' "
-        "and cluster_name eq 'elb-cluster-01'"
+        "status ne 'deleted' and subscription_id eq 'sub-1' and cluster_name eq 'elb-cluster-01'"
     ]
 
 
@@ -428,8 +465,7 @@ def test_list_for_scope_uses_rg_when_cluster_name_omitted(monkeypatch) -> None:
     )
 
     assert queries == [
-        "status ne 'deleted' and subscription_id eq 'sub-1' "
-        "and resource_group eq 'rg-elb-cluster'"
+        "status ne 'deleted' and subscription_id eq 'sub-1' and resource_group eq 'rg-elb-cluster'"
     ]
 
 
@@ -665,10 +701,7 @@ def test_get_many_chunks_large_id_set(monkeypatch) -> None:
     map, which re-creates every row on every poll)."""
     captured: list[str] = []
     job_ids = [f"job-{i:04d}" for i in range(120)]
-    rows = [
-        JobState(job_id=jid, type="blast", status="completed").to_entity()
-        for jid in job_ids
-    ]
+    rows = [JobState(job_id=jid, type="blast", status="completed").to_entity() for jid in job_ids]
     rows_by_pk = {entity["PartitionKey"]: entity for entity in rows}
 
     class ChunkingTableClient:
@@ -859,6 +892,60 @@ def test_update_submits_only_the_changed_fields(monkeypatch) -> None:
     assert "payload_json" not in patch
 
 
+def test_update_preserves_scalar_transition_when_payload_cannot_fit(monkeypatch) -> None:
+    submitted: list[dict[str, object]] = []
+    existing_entity = JobState(
+        job_id="job-oversized",
+        type="blast",
+        status="running",
+        phase="submitting",
+        payload={"program": "blastn", "db": "old-db", "stable": True},
+    ).to_entity()
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def get_entity(self, *, partition_key: str, row_key: str) -> dict[str, object]:
+            return dict(existing_entity)
+
+        def update_entity(self, entity: dict[str, object], **_kwargs: object) -> None:
+            submitted.append(entity)
+
+    def _too_large(_payload: dict[str, object]) -> tuple[str, bool]:
+        raise JobStatePayloadTooLarge("still too large")
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+    monkeypatch.setattr(state_repo, "serialise_jobstate_payload", _too_large)
+
+    repo = JobStateRepository()
+    updated = repo.update(
+        "job-oversized",
+        status="failed",
+        phase="failed",
+        payload={"program": "blastp", "db": "new-db", "opaque": "z" * 100_000},
+    )
+
+    assert updated.status == "failed"
+    assert updated.phase == "failed"
+    assert submitted[0]["status"] == "failed"
+    assert submitted[0]["phase"] == "failed"
+    assert "payload_json" not in submitted[0]
+    assert "schema_version" not in submitted[0]
+    assert "program" not in submitted[0]
+    assert "db" not in submitted[0]
+    assert updated.program == "blastn"
+    assert updated.db == "old-db"
+
+
 def test_update_backfills_scope_columns_without_status(monkeypatch) -> None:
     """A scope-only ``update`` MUST patch just the scope columns + updated_at.
 
@@ -1020,10 +1107,7 @@ def test_backfill_elastic_blast_job_id_reads_winner_after_repeated_etag_races(
             self.metadata = {"etag": etag}
 
     entities = iter(
-        [
-            Entity({"elastic_blast_job_id": ""}, f"etag-{index}")
-            for index in range(1, 4)
-        ]
+        [Entity({"elastic_blast_job_id": ""}, f"etag-{index}") for index in range(1, 4)]
         + [Entity({"elastic_blast_job_id": winner}, "etag-4")]
     )
 
@@ -1179,6 +1263,52 @@ def test_backfill_payload_section_retries_without_losing_concurrent_fields(monke
     assert payload["external"]["exact_oracle"] == {"run_id": "run-1"}
 
 
+def test_backfill_payload_section_skips_oversized_evidence(monkeypatch, caplog) -> None:
+    existing_entity = JobState(
+        job_id="job-evidence",
+        type="blast",
+        status="completed",
+        payload={"external": {"submission_source": "external_api"}},
+    ).to_entity()
+
+    class Entity(dict[str, object]):
+        metadata: ClassVar[dict[str, str]] = {"etag": "etag-1"}
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def get_entity(self, **_kwargs: object) -> Entity:
+            return Entity(existing_entity)
+
+        def update_entity(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("oversized evidence must not reach Table update")
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+    monkeypatch.setattr(
+        state_repo,
+        "serialise_jobstate_payload",
+        lambda _payload: (_ for _ in ()).throw(JobStatePayloadTooLarge("too large")),
+    )
+
+    changed = JobStateRepository().backfill_payload_section(
+        "job-evidence",
+        "external",
+        {"exact_oracle": {"run_id": "run-1"}},
+    )
+
+    assert changed is False
+    assert "payload section backfill skipped: oversized payload" in caplog.text
+
+
 def test_backfill_payload_section_preserves_conflicts(monkeypatch, caplog) -> None:
     existing_entity = JobState(
         job_id="job-evidence",
@@ -1223,9 +1353,7 @@ def test_backfill_payload_section_preserves_conflicts(monkeypatch, caplog) -> No
     assert changed is True
     payload = json.loads(str(submitted[0]["payload_json"]))
     assert payload["external"]["exact_oracle"] == {"run_id": "stored-run"}
-    assert payload["external"]["web_blast_statistics"] == {
-        "effective_search_space": 123
-    }
+    assert payload["external"]["web_blast_statistics"] == {"effective_search_space": 123}
     assert "preserving stored value" in caplog.text
 
 
@@ -1440,8 +1568,7 @@ def test_list_recent_terminal_returns_newest_first_no_starvation(monkeypatch) ->
         for idx in range(1, 6)
     ]
     full_by_pk = {
-        row["PartitionKey"]: {**row, "payload_json": '{"external": {}}'}
-        for row in summaries
+        row["PartitionKey"]: {**row, "payload_json": '{"external": {}}'} for row in summaries
     }
 
     class RecordingTableClient:
@@ -1515,6 +1642,4 @@ def test_list_methods_clamp_page_size_to_azure_tables_max(monkeypatch) -> None:
     # All page sizes must stay <= 1000 (Azure Tables hard max).
     page_sizes = [page for _filter, page in captured]
     assert page_sizes, "no query_entities calls captured"
-    assert all(p <= 1000 for p in page_sizes), (
-        f"page sizes exceed Azure Tables max: {page_sizes!r}"
-    )
+    assert all(p <= 1000 for p in page_sizes), f"page sizes exceed Azure Tables max: {page_sizes!r}"

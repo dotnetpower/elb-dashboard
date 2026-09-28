@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
@@ -180,6 +181,7 @@ class _FakeTable:
         # Counts rows YIELDED from query_entities so a test can assert the
         # indexed read path consumes at most ~limit rows (bounded scan).
         self.query_count = 0
+        self.query_page_sizes: list[int] = []
 
     def __enter__(self) -> _FakeTable:
         return self
@@ -236,6 +238,7 @@ class _FakeTable:
         # must emulate it rather than returning dict-insertion order. Yields
         # lazily + counts so a caller that breaks at limit+1 only consumes that
         # many rows (the bounded-scan guarantee).
+        self.query_page_sizes.append(int(_kw.get("results_per_page") or 0))
         matched = [dict(r) for r in self.rows.values() if _match(r, query_filter)]
         matched.sort(key=lambda e: (str(e.get("PartitionKey")), str(e.get("RowKey"))))
         for row in matched:
@@ -504,6 +507,29 @@ def test_list_all_page_bounded_scan(
     assert index.query_count <= 3  # type: ignore[attr-defined]
 
 
+def test_list_all_page_detects_more_across_table_page_boundary(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+    for index in range(1001):
+        repo.create(
+            _job(
+                f"job-{index:04d}",
+                owner="owner-a",
+                created_at=f"2026-06-18T10:{index // 60:02d}:{index % 60:02d}+00:00",
+            )
+        )
+
+    first, cursor = repo.list_all_page(limit=1000)
+    second, final_cursor = repo.list_all_page(limit=1000, cursor=cursor or "")
+
+    assert len(first) == 1000
+    assert cursor is not None
+    assert len(second) == 1
+    assert final_cursor is None
+    assert len({row.job_id for row in [*first, *second]}) == 1001
+
+
 def test_list_all_uses_index_when_enabled(
     repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -693,6 +719,58 @@ def test_reconcile_time_index_progress_uses_scanned_cadence(
     ]
 
 
+def test_reconcile_time_index_batch_advances_without_gaps(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("JOBSTATE_TIME_INDEX_ENABLED", raising=False)
+    for index in range(3):
+        repo.create(
+            _job(
+                f"job-{index}",
+                owner="owner-a",
+                created_at=f"2026-06-18T10:00:0{index}+00:00",
+            )
+        )
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+
+    first = repo.reconcile_time_index_batch(max_rows=2)
+    assert (first.scanned, first.written) == (2, 4)
+    assert first.next_partition_key == "job-1"
+    assert first.cycle_complete is False
+    assert repo._test_tables["jobstate"].query_page_sizes[-1] == 3  # type: ignore[attr-defined]
+
+    second = repo.reconcile_time_index_batch(
+        start_after_partition_key=first.next_partition_key,
+        max_rows=2,
+    )
+    assert (second.scanned, second.written) == (1, 2)
+    assert second.next_partition_key == ""
+    assert second.cycle_complete is True
+    assert len(repo._test_tables[time_index.INDEX_TABLE_NAME].rows) == 6  # type: ignore[attr-defined]
+
+
+def test_reconcile_time_index_suppresses_only_existence_checks(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+    repo.create(_job("job-0", owner="owner-a", created_at="2026-06-18T10:00:00+00:00"))
+    entered = 0
+
+    @contextmanager
+    def _counting_suppression() -> Iterator[None]:
+        nonlocal entered
+        entered += 1
+        yield
+
+    monkeypatch.setattr(
+        "api.app.telemetry.suppress_dependency_telemetry",
+        _counting_suppression,
+    )
+
+    assert repo.reconcile_time_index() == (1, 0)
+    assert entered == 2
+
+
 def test_reconcile_time_index_task_noop_when_flag_off(
     repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -730,10 +808,17 @@ def test_reconcile_time_index_task_heals_missing_rows_when_flag_on(
 
     monkeypatch.setattr(task_module, "_acquire_reconcile_lock", lambda: ((object(), "token"), ""))
     monkeypatch.setattr(task_module, "_release_reconcile_lock", lambda _handle: None)
+    monkeypatch.setattr(task_module, "_load_reconcile_cursor", lambda: "")
+    monkeypatch.setattr(task_module, "_save_reconcile_cursor", lambda _cursor: None)
     reconcile_time_index = task_module.reconcile_time_index
 
     result = reconcile_time_index.run()
-    assert result == {"scanned": 2, "written": 4}
+    assert result == {
+        "scanned": 2,
+        "written": 4,
+        "cycle_complete": True,
+        "batch_limit": 1000,
+    }
 
     index = repo._test_tables[time_index.INDEX_TABLE_NAME]  # type: ignore[attr-defined]
     keys = set(index.rows.keys())
@@ -749,7 +834,12 @@ def test_reconcile_time_index_task_heals_missing_rows_when_flag_on(
 
     # Idempotent: a second pass observes the same RowKeys and performs no writes.
     result2 = reconcile_time_index.run()
-    assert result2 == {"scanned": 2, "written": 0}
+    assert result2 == {
+        "scanned": 2,
+        "written": 0,
+        "cycle_complete": True,
+        "batch_limit": 1000,
+    }
     assert set(repo._test_tables[time_index.INDEX_TABLE_NAME].rows.keys()) == keys  # type: ignore[attr-defined]
 
 
@@ -766,8 +856,8 @@ def test_reconcile_time_index_task_skips_when_lock_is_held(
     )
     monkeypatch.setattr(
         repo,
-        "reconcile_time_index",
-        lambda: (_ for _ in ()).throw(AssertionError("locked task must not scan")),
+        "reconcile_time_index_batch",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("locked task must not scan")),
     )
 
     assert task_module.reconcile_time_index.run() == {
@@ -837,6 +927,55 @@ def test_reconcile_time_index_lock_acquire_propagates_soft_timeout(
         task_module._acquire_reconcile_lock()
 
 
+def test_reconcile_time_index_malformed_cursor_restarts_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.state import singletons
+    from api.tasks.blast import time_index_reconcile_task as task_module
+
+    monkeypatch.setattr(
+        singletons,
+        "load_singleton_strict",
+        lambda _key: (_ for _ in ()).throw(ValueError("malformed payload")),
+    )
+
+    assert task_module._load_reconcile_cursor() == ""
+
+
+def test_reconcile_time_index_cursor_storage_outage_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.state import singletons
+    from api.tasks.blast import time_index_reconcile_task as task_module
+
+    monkeypatch.setattr(
+        singletons,
+        "load_singleton_strict",
+        lambda _key: (_ for _ in ()).throw(RuntimeError("storage unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="storage unavailable"):
+        task_module._load_reconcile_cursor()
+
+
+def test_reconcile_time_index_rejects_malformed_next_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.state import singletons
+    from api.tasks.blast import time_index_reconcile_task as task_module
+
+    saves: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        singletons,
+        "save_singleton",
+        lambda _key, payload: saves.append(payload) or True,
+    )
+
+    with pytest.raises(ValueError, match="next cursor is malformed"):
+        task_module._save_reconcile_cursor("bad\nvalue")
+    assert saves == []
+
+
 @pytest.mark.parametrize("exc", [RuntimeError("storage unavailable"), SoftTimeLimitExceeded()])
 def test_reconcile_time_index_task_propagates_failure_and_releases_lock(
     repo: JobStateRepository,
@@ -851,10 +990,11 @@ def test_reconcile_time_index_task_propagates_failure_and_releases_lock(
     monkeypatch.setattr(task_module, "_acquire_reconcile_lock", lambda: (handle, ""))
     monkeypatch.setattr(task_module, "_release_reconcile_lock", released.append)
     monkeypatch.setattr(state_repo, "get_state_repo", lambda: repo)
+    monkeypatch.setattr(task_module, "_load_reconcile_cursor", lambda: "")
     monkeypatch.setattr(
         repo,
-        "reconcile_time_index",
-        lambda: (_ for _ in ()).throw(exc),
+        "reconcile_time_index_batch",
+        lambda **_kwargs: (_ for _ in ()).throw(exc),
     )
 
     with pytest.raises(type(exc)):
@@ -878,3 +1018,8 @@ def test_reconcile_time_index_task_and_schedule_are_bounded() -> None:
     schedule = celery_app.conf.beat_schedule["blast-reconcile-time-index"]
     assert schedule["options"]["expires"] < schedule["schedule"]
     assert task_module.reconcile_time_index.time_limit < schedule["options"]["expires"]
+    assert (
+        task_module._RECONCILE_SOFT_TIME_LIMIT_SECONDS
+        < task_module._RECONCILE_HARD_TIME_LIMIT_SECONDS
+        < task_module._RECONCILE_LOCK_TTL_SECONDS
+    )

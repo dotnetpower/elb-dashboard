@@ -130,7 +130,9 @@ def blast_job_cancel(
                 "storage_account": ("storage_account",),
             }.items():
                 if request_body.get(body_key) in (None, ""):
-                    value = _payload_value(payload, *payload_keys)
+                    value = getattr(state, body_key, None)
+                    if value in (None, ""):
+                        value = _payload_value(payload, *payload_keys)
                     if value not in (None, ""):
                         request_body[body_key] = value
     except HTTPException:

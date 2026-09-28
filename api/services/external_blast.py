@@ -828,11 +828,7 @@ def _ready_inflight_acquire(key: tuple[str, str]) -> tuple[bool, threading.Event
 
 
 def _ready_inflight_release(key: tuple[str, str]) -> None:
-    """Wake waiters and drop the slot.
-
-    Idempotent so callers can release in a ``finally`` without checking they
-    were actually the leader.
-    """
+    """Wake waiters and drop a slot owned by the calling leader."""
     with _READY_INFLIGHT_LOCK:
         event = _READY_INFLIGHT.pop(key, None)
     if event is not None:
@@ -953,7 +949,8 @@ def ready(
     try:
         return _ready_probe_upstream(cache_key, resolved_base, api_token=resolved_api_token)
     finally:
-        _ready_inflight_release(cache_key)
+        if is_leader:
+            _ready_inflight_release(cache_key)
 
 
 def _ready_probe_upstream(

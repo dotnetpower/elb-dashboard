@@ -24,6 +24,7 @@ import logging
 import os
 import threading
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -37,11 +38,13 @@ from api.services.state.job_state import (
     _JOB_SCHEMA_VERSION,
     _JOBSTATE_SUMMARY_SELECT,
     JobState,
+    JobStatePayloadTooLarge,
     _now_iso,
     _sanitise_odata_value,
     _ulid_like,
     canonical_elastic_blast_job_id,
     canonical_job_metadata,
+    serialise_jobstate_payload,
 )
 from api.services.state.table_pool import (
     _ENSURED_TABLES,
@@ -75,6 +78,16 @@ LOGGER = logging.getLogger(__name__)
 # can still ask for a logical limit > 1000 — we just have to clamp the
 # per-request page size and let pagination do its job.
 _AZURE_TABLES_MAX_PAGE_SIZE = 1000
+
+
+@dataclass(frozen=True)
+class TimeIndexReconcileBatch:
+    """Outcome of one bounded time-index repair batch."""
+
+    scanned: int
+    written: int
+    next_partition_key: str
+    cycle_complete: bool
 
 
 def _clamp_page_size(limit: int) -> int:
@@ -380,8 +393,38 @@ class JobStateRepository:
         ``jobstateindex``), so it is safe to run before a flip to size the
         backfill.
         """
+        result = self.reconcile_time_index_batch(
+            dry_run=dry_run,
+            batch_log_every=batch_log_every,
+        )
+        return result.scanned, result.written
+
+    def reconcile_time_index_batch(
+        self,
+        *,
+        start_after_partition_key: str = "",
+        max_rows: int | None = None,
+        dry_run: bool = False,
+        batch_log_every: int = 500,
+    ) -> TimeIndexReconcileBatch:
+        """Heal one bounded slice of missing time-index rows.
+
+        ``start_after_partition_key`` is an exclusive cursor over the source
+        table's stable PartitionKey ordering. ``max_rows=None`` preserves the
+        historical full-scan behaviour used by the one-shot backfill. A
+        bounded caller persists ``next_partition_key`` only after this method
+        returns, so interruption replays the same idempotent slice instead of
+        skipping unverified rows.
+        """
+        if max_rows is not None and max_rows < 1:
+            raise ValueError("time-index reconcile max_rows must be positive")
+
+        from api.app.telemetry import suppress_dependency_telemetry
+
         written = 0
         scanned = 0
+        last_partition_key = ""
+        has_more = False
 
         if not dry_run:
             self._ensure_table(INDEX_TABLE_NAME)
@@ -390,16 +433,25 @@ class JobStateRepository:
         # payload. ``status ne 'deleted'`` mirrors the listing filter so
         # tombstones are not indexed.
         select = ["PartitionKey", "RowKey", "owner_oid", "created_at", "status"]
+        clauses = ["RowKey eq 'current'", "status ne 'deleted'"]
+        if start_after_partition_key:
+            escaped_cursor = _sanitise_odata_value(start_after_partition_key)
+            clauses.append(f"PartitionKey gt '{escaped_cursor}'")
+        filter_expr = " and ".join(clauses)
+        query_page_size = _clamp_page_size(
+            max_rows + 1 if max_rows is not None else _AZURE_TABLES_MAX_PAGE_SIZE
+        )
+
         with self._state_client() as state_t:
             try:
                 entities = state_t.query_entities(
-                    "RowKey eq 'current' and status ne 'deleted'",
-                    results_per_page=1000,
+                    filter_expr,
+                    results_per_page=query_page_size,
                     select=select,
                 )
             except ResourceNotFoundError:
                 # jobstate table not created yet -> nothing to reconcile.
-                return 0, 0
+                return TimeIndexReconcileBatch(0, 0, "", True)
 
             # The index client is POOLED and owned by this repository — do NOT
             # close it here. Closing the shared pooled client would tear down the
@@ -409,10 +461,14 @@ class JobStateRepository:
             # process exit / ``reset_state_repo_cache()``.
             index_t = None if dry_run else self._index_client()
             for entity in entities:
+                if max_rows is not None and scanned >= max_rows:
+                    has_more = True
+                    break
                 scanned += 1
                 job_id = str(entity.get("PartitionKey") or "")
                 if not job_id:
                     continue
+                last_partition_key = job_id
                 for index_entity in index_entities(
                     job_id=job_id,
                     owner_oid=entity.get("owner_oid"),
@@ -424,10 +480,17 @@ class JobStateRepository:
                     if index_t is None:  # pragma: no cover - construction invariant
                         continue
                     try:
-                        index_t.get_entity(
-                            partition_key=index_entity["PartitionKey"],
-                            row_key=index_entity["RowKey"],
-                        )
+                        # Existing-row checks dominate this maintenance pass
+                        # and are intentionally best-effort telemetry-wise:
+                        # the task summary records every scan/repair, while a
+                        # failed check is logged and re-raised below. Keep the
+                        # mutating create outside suppression so actual repairs
+                        # remain visible as dependency spans.
+                        with suppress_dependency_telemetry():
+                            index_t.get_entity(
+                                partition_key=index_entity["PartitionKey"],
+                                row_key=index_entity["RowKey"],
+                            )
                     except ResourceNotFoundError:
                         try:
                             index_t.create_entity(index_entity)
@@ -435,6 +498,13 @@ class JobStateRepository:
                             # A concurrent repair won the create race.
                             continue
                         written += 1
+                    except Exception as exc:
+                        LOGGER.warning(
+                            "jobstate time-index existence check failed job_id=%s reason=%s",
+                            job_id,
+                            type(exc).__name__,
+                        )
+                        raise
                 if batch_log_every and scanned % batch_log_every == 0:
                     LOGGER.info(
                         "jobstate time-index reconcile progress scanned=%d written=%d",
@@ -442,7 +512,12 @@ class JobStateRepository:
                         written,
                     )
 
-        return scanned, written
+        return TimeIndexReconcileBatch(
+            scanned=scanned,
+            written=written,
+            next_partition_key=last_partition_key if has_more else "",
+            cycle_complete=not has_more,
+        )
 
     # --- jobstate ---
 
@@ -720,11 +795,22 @@ class JobStateRepository:
                     return False
                 now = _now_iso()
                 try:
+                    try:
+                        payload_json = serialise_jobstate_payload(payload)[0]
+                    except JobStatePayloadTooLarge as exc:
+                        LOGGER.warning(
+                            "payload section backfill skipped: oversized payload "
+                            "job_id=%s section=%s reason=%s",
+                            job_id,
+                            section_name,
+                            exc,
+                        )
+                        return False
                     table.update_entity(
                         {
                             "PartitionKey": job_id,
                             "RowKey": "current",
-                            "payload_json": json.dumps(payload, default=str),
+                            "payload_json": payload_json,
                             "updated_at": now,
                         },
                         mode=UpdateMode.MERGE,
@@ -817,20 +903,36 @@ class JobStateRepository:
                 e["error_code"] = error_code
                 patch["error_code"] = error_code
             if payload is not None:
-                import json
-
-                payload_json = json.dumps(payload, default=str)
-                e["payload_json"] = payload_json
-                patch["payload_json"] = payload_json
-                canonical = canonical_job_metadata(
-                    payload,
-                    job_id=job_id,
-                    state_type=str(e.get("type") or ""),
-                )
-                e["schema_version"] = _JOB_SCHEMA_VERSION
-                patch["schema_version"] = _JOB_SCHEMA_VERSION
-                e.update(canonical)
-                patch.update(canonical)
+                try:
+                    payload_json, payload_compacted = serialise_jobstate_payload(payload)
+                except JobStatePayloadTooLarge as exc:
+                    # Preserve the state-machine transition even when an
+                    # unrelated oversized payload cannot be represented in one
+                    # Azure Table property. The existing durable payload stays
+                    # intact; callers still receive an explicit warning.
+                    LOGGER.warning(
+                        "jobstate payload update skipped job_id=%s reason=%s",
+                        job_id,
+                        exc,
+                    )
+                else:
+                    e["payload_json"] = payload_json
+                    patch["payload_json"] = payload_json
+                    if payload_compacted:
+                        LOGGER.warning(
+                            "jobstate progress payload compacted job_id=%s utf16_bytes=%d",
+                            job_id,
+                            len(payload_json.encode("utf-16-le")),
+                        )
+                    canonical = canonical_job_metadata(
+                        payload,
+                        job_id=job_id,
+                        state_type=str(e.get("type") or ""),
+                    )
+                    e["schema_version"] = _JOB_SCHEMA_VERSION
+                    patch["schema_version"] = _JOB_SCHEMA_VERSION
+                    e.update(canonical)
+                    patch.update(canonical)
             # Explicit scope args are written AFTER the payload-canonical block
             # so a caller that passes both (payload + an explicit scope kwarg)
             # gets the explicit value, not the payload-derived one. Today the
@@ -1019,7 +1121,8 @@ class JobStateRepository:
         tombstoned (``status='deleted'``) are skipped defensively (a delete that
         raced the index read).
         """
-        page_size = _clamp_page_size(limit + 1)
+        target_count = limit + 1
+        page_size = _clamp_page_size(target_count)
         after = decode_cursor(cursor)
         buckets: list[str] = []
         for bucket in (owner_bucket(owner_oid), owner_bucket("")):
@@ -1047,7 +1150,7 @@ class JobStateRepository:
                             continue
                         merged.append((rk, jid))
                         taken += 1
-                        if taken >= page_size:
+                        if taken >= target_count:
                             break
                 except ResourceNotFoundError:
                     # Index table not created yet -> treat as empty (caller
@@ -1097,7 +1200,8 @@ class JobStateRepository:
         (``status='deleted'``) are skipped defensively (a delete that raced the
         index read).
         """
-        page_size = _clamp_page_size(limit + 1)
+        target_count = limit + 1
+        page_size = _clamp_page_size(target_count)
         after = decode_cursor(cursor)
         clauses = [f"PartitionKey eq '{_sanitise_odata_value(ALL_BUCKET)}'"]
         if after:
@@ -1119,7 +1223,7 @@ class JobStateRepository:
                         continue
                     index_rows.append((rk, jid))
                     taken += 1
-                    if taken >= page_size:
+                    if taken >= target_count:
                         break
             except ResourceNotFoundError:
                 # Index table not created yet -> empty (caller falls back).

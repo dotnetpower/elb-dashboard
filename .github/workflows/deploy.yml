@@ -158,29 +158,6 @@ jobs:
         # --yes silences the prompt; --upgrade keeps an existing one fresh.
         run: az extension add --name containerapp --yes --upgrade -o none
 
-      - name: Verify chosen image tag exists in ACR
-        run: |
-          set -euo pipefail
-          tag="${DEPLOY_TAG}"
-          sidecar="${DEPLOY_SIDECAR}"
-          case "$sidecar" in
-            all)      images=(elb-api elb-frontend elb-terminal) ;;
-            api|worker|beat) images=(elb-api) ;;
-            frontend) images=(elb-frontend) ;;
-            terminal) images=(elb-terminal) ;;
-            *) echo "unknown sidecar '$sidecar'" >&2; exit 1 ;;
-          esac
-          missing=0
-          for img in "${images[@]}"; do
-            if az acr repository show-tags --name "$ACR_NAME" --repository "$img" --query "[?@=='$tag']" -o tsv 2>/dev/null | grep -qx "$tag"; then
-              echo "  ✓ $img:$tag"
-            else
-              echo "  ✗ $img:$tag NOT FOUND in ACR" >&2
-              missing=1
-            fi
-          done
-          [ "$missing" = "0" ] || { echo "Refusing to deploy — at least one image tag is missing. Run the Build Images workflow first." >&2; exit 1; }
-
       - name: Patch Container App (no rebuild)
         env:
           ELB_QUICK_DEPLOY_SKIP_CONFIRM: "1"

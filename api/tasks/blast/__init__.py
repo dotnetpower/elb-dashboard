@@ -12,6 +12,7 @@ Validation: `uv run pytest -q api/tests/test_blast_tasks.py`.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from datetime import UTC
 from typing import Any
@@ -115,10 +116,46 @@ def _external_reconcile_job_id(row: Any) -> str:
     return ""
 
 
+def _openapi_reconcile_job_id(row: Any) -> str:
+    """Return the sibling's 6-12 hex queue id for external-origin rows.
+
+    ``elastic_blast_job_id`` is a distinct ``job-<32hex>`` runtime identity
+    used by Kubernetes and Storage. The sibling status API rejects that value;
+    it indexes jobs by the short id returned from ``POST /v1/jobs``. Dashboard
+    jobs therefore never qualify for this lookup, even when they carry a valid
+    ElasticBLAST runtime id.
+    """
+    payload = row.payload if isinstance(getattr(row, "payload", None), Mapping) else {}
+    if payload.get("placeholder") is True:
+        return ""
+    external = payload.get("external")
+    external_payload = external if isinstance(external, Mapping) else {}
+    source = str(
+        getattr(row, "submission_source", "")
+        or external_payload.get("submission_source")
+        or payload.get("submission_source")
+        or ""
+    ).strip()
+    if source and source not in {"external_api", "servicebus"}:
+        return ""
+    if not source and not (
+        isinstance(external, Mapping) or str(getattr(row, "owner_upn", "") or "").strip() == "api"
+    ):
+        return ""
+    for value in (
+        external_payload.get("job_id"),
+        payload.get("openapi_job_id"),
+        getattr(row, "job_id", ""),
+    ):
+        candidate = str(value or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{6,12}", candidate):
+            return candidate
+    return ""
+
+
 def _storage_account_from_row(row: Any) -> str:
     payload = row.payload if isinstance(getattr(row, "payload", None), Mapping) else {}
     return str(getattr(row, "storage_account", "") or payload.get("storage_account") or "")
-
 
 
 # Re-import task entry points defined in dedicated submodules so Celery's
@@ -228,5 +265,3 @@ from api.tasks.blast.submit_task import submit  # noqa: E402
 from api.tasks.blast.time_index_reconcile_task import (  # noqa: E402,F401
     reconcile_time_index,
 )
-
-

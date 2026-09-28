@@ -460,9 +460,7 @@ def test_artifact_finalizer_terminalizes_expired_runtime_identity(monkeypatch) -
             "reconcile_attempts": blast_artifacts._RECONCILE_ATTEMPT_MAX,
         }
     ]
-    assert history == [
-        ("job-1", "artifact_runtime_identity_timeout", {"timeout_seconds": 1800})
-    ]
+    assert history == [("job-1", "artifact_runtime_identity_timeout", {"timeout_seconds": 1800})]
 
 
 def test_reconcile_terminal_artifacts_is_bounded_and_row_isolated(monkeypatch) -> None:
@@ -743,6 +741,61 @@ def test_finalizer_records_exhausted_pod_log_capture(monkeypatch) -> None:
     ]
 
 
+def test_finalizer_skips_pod_logs_after_retention_window(monkeypatch) -> None:
+    import api.services.job_logs.persist as log_persist
+    import api.services.state_repo as state_repo
+    import api.tasks.blast_artifacts as blast_artifacts
+
+    runtime_identity = "job-22222222222222222222222222222222"
+    state = _state(
+        status="failed",
+        phase="failed",
+        storage_account="",
+        elastic_blast_job_id=runtime_identity,
+        updated_at="2026-01-01T00:00:00Z",
+    )
+    writes: list[tuple[str, dict[str, object]]] = []
+
+    class FakeRepo:
+        @staticmethod
+        def get(_job_id: str):
+            return state
+
+        @staticmethod
+        def append_history(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("retention skips are not failures")
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: None)
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda _job_id, artifact_type, **kwargs: writes.append((artifact_type, kwargs)),
+    )
+    monkeypatch.setattr(job_artifacts, "write_execution_steps_snapshot", lambda *_args: {})
+    monkeypatch.setattr(
+        log_persist,
+        "persist_completed_job_pod_logs",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("expired pod logs must not be fetched")
+        ),
+    )
+
+    result = blast_artifacts.finalize_job_artifacts.run(job_id="job-1")
+
+    assert result["status"] == "completed"
+    assert result["pod_logs"] == "retention_window_elapsed"
+    assert (
+        "pod_logs",
+        {
+            "status": "skipped",
+            "error_code": "retention_window_elapsed",
+            "runtime_identity": runtime_identity,
+            "reconcile_attempts": 1,
+        },
+    ) in writes
+
+
 def test_finalizer_records_pod_log_retry_enqueue_failure(monkeypatch) -> None:
     import api.services.job_logs.persist as log_persist
     import api.services.state_repo as state_repo
@@ -754,6 +807,7 @@ def test_finalizer_records_pod_log_retry_enqueue_failure(monkeypatch) -> None:
         phase="failed",
         storage_account="",
         elastic_blast_job_id=runtime_identity,
+        updated_at="2099-01-01T00:00:00Z",
     )
     writes: list[tuple[str, dict[str, object]]] = []
     history: list[tuple[str, str, dict[str, object]]] = []
@@ -894,6 +948,78 @@ def test_read_json_artifact_marks_failed_when_gzip_blob_missing(monkeypatch) -> 
     assert job_artifacts.read_json_artifact("job-1", "result_aggregate") is None
     assert upserts and upserts[0]["status"] == "failed"
     assert upserts[0]["error_code"] == "blob_missing"
+
+
+def test_read_json_artifact_marks_failed_when_json_is_invalid(monkeypatch) -> None:
+    state = ArtifactState(
+        job_id="job-1",
+        artifact_type="result_aggregate",
+        status="ready",
+        blob_path="job-1/results/aggregate.json",
+    )
+    upserts: list[dict[str, str]] = []
+
+    monkeypatch.setenv("AZURE_BLOB_ENDPOINT", "https://acct.blob.core.windows.net")
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: state)
+    monkeypatch.setattr(job_artifacts, "get_credential", lambda: object())
+    monkeypatch.setattr(
+        job_artifacts.storage_data,
+        "read_blob_text",
+        lambda *_args, **_kwargs: "{not-json",
+    )
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda job_id, artifact_type, **kw: upserts.append(
+            {"job_id": job_id, "type": artifact_type, **kw}
+        ),
+    )
+
+    assert job_artifacts.read_json_artifact("job-1", "result_aggregate") is None
+    assert upserts == [
+        {
+            "job_id": "job-1",
+            "type": "result_aggregate",
+            "status": "failed",
+            "error_code": "invalid_json",
+        }
+    ]
+
+
+def test_read_json_artifact_marks_failed_when_gzip_is_invalid(monkeypatch) -> None:
+    state = ArtifactState(
+        job_id="job-1",
+        artifact_type="result_aggregate",
+        status="ready",
+        blob_path="job-1/results/aggregate.json.gz",
+    )
+    upserts: list[dict[str, str]] = []
+
+    monkeypatch.setenv("AZURE_BLOB_ENDPOINT", "https://acct.blob.core.windows.net")
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: state)
+    monkeypatch.setattr(job_artifacts, "get_credential", lambda: object())
+    monkeypatch.setattr(
+        job_artifacts.storage_data,
+        "stream_blob_bytes",
+        lambda *_args: [b"not-gzip"],
+    )
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda job_id, artifact_type, **kw: upserts.append(
+            {"job_id": job_id, "type": artifact_type, **kw}
+        ),
+    )
+
+    assert job_artifacts.read_json_artifact("job-1", "result_aggregate") is None
+    assert upserts == [
+        {
+            "job_id": "job-1",
+            "type": "result_aggregate",
+            "status": "failed",
+            "error_code": "invalid_gzip",
+        }
+    ]
 
 
 def test_invalidate_ready_artifact_is_compare_and_set(monkeypatch) -> None:

@@ -51,9 +51,10 @@ __all__ = (
 
 def _row_is_external_origin(row: Any) -> bool:
     payload = row.payload if isinstance(getattr(row, "payload", None), Mapping) else {}
-    return isinstance(payload.get("external"), Mapping) or str(
-        getattr(row, "owner_upn", "") or ""
-    ) == "api"
+    return (
+        isinstance(payload.get("external"), Mapping)
+        or str(getattr(row, "owner_upn", "") or "") == "api"
+    )
 
 
 def _servicebus_published_terminal_state(row: Any) -> tuple[str, str, str] | None:
@@ -210,9 +211,7 @@ def _worker_lost_reason(
         from api.services import get_credential
         from api.services.cluster_health import get_cluster_health
 
-        health = get_cluster_health(
-            get_credential(), subscription_id, resource_group, cluster_name
-        )
+        health = get_cluster_health(get_credential(), subscription_id, resource_group, cluster_name)
     except Exception as exc:
         LOGGER.info(
             "reconcile_stale_jobs: cluster health probe skipped job_id=%s: %s",
@@ -395,9 +394,7 @@ def reconcile_stale_jobs(
                     repo.update(row.job_id, status=status, phase=phase)
                 submit_task_completed_active = True
             if celery_status in {"FAILURE", "REVOKED"}:
-                err = (
-                    _blast._snippet(celery_result) if celery_result is not None else "task_failed"
-                )
+                err = _blast._snippet(celery_result) if celery_result is not None else "task_failed"
                 # Go through `_update_state` (which runs `_merge_progress_payload`)
                 # rather than `repo.update(...)` directly. The merge sweeps any
                 # orphan `status: "running"` step entries that the crashed worker
@@ -428,26 +425,27 @@ def reconcile_stale_jobs(
             refreshed = False
             external_missing = False
             external_active = False
-            external_job_id = _blast._external_reconcile_job_id(row)
-            if not external_job_id and submit_task_completed_active:
+            runtime_job_id = _blast._external_reconcile_job_id(row)
+            if not runtime_job_id and submit_task_completed_active:
                 storage_account = _blast._storage_account_from_row(row)
-                external_job_id = _BLAST_EXPORTS._discover_elastic_blast_job_id(
+                runtime_job_id = _BLAST_EXPORTS._discover_elastic_blast_job_id(
                     storage_account,
                     str(row.job_id),
                 )
-                if external_job_id:
+                if runtime_job_id:
                     stored_runtime_id = repo.backfill_elastic_blast_job_id(
                         row.job_id,
-                        external_job_id,
+                        runtime_job_id,
                     )
-                    external_job_id = stored_runtime_id or external_job_id
+                    runtime_job_id = stored_runtime_id or runtime_job_id
+            openapi_job_id = _blast._openapi_reconcile_job_id(row)
             k8s_outcome = _reconcile_row_k8s_status(
                 repo,
                 row,
                 subscription_id=str(sub),
                 resource_group=str(rg),
                 cluster_name=str(cluster),
-                elastic_blast_job_id=external_job_id,
+                elastic_blast_job_id=runtime_job_id,
             )
             k8s_missing = k8s_outcome == "missing"
             if k8s_outcome and not k8s_missing:
@@ -461,7 +459,7 @@ def reconcile_stale_jobs(
                 else:
                     summary["untouched"] += 1
                 continue
-            if sub and rg and cluster and external_job_id:
+            if sub and rg and cluster and openapi_job_id:
                 try:
                     from api.routes._blast_shared import (
                         _external_to_blast_job,
@@ -471,7 +469,7 @@ def reconcile_stale_jobs(
 
                     kwargs = _openapi_client_kwargs_from_cluster(sub, rg, cluster)
                     if kwargs:
-                        detail = external_blast.get_job(external_job_id, **kwargs)
+                        detail = external_blast.get_job(openapi_job_id, **kwargs)
                         converted = _external_to_blast_job(detail)
                         ext_status = str(converted.get("status") or "")
                         ext_phase = str(converted.get("phase") or ext_status)
@@ -513,9 +511,9 @@ def reconcile_stale_jobs(
                 if _blast._has_blast_success_marker(
                     storage_account,
                     str(row.job_id),
-                    external_job_id,
+                    runtime_job_id,
                 ):
-                    extra = {"elastic_blast_job_id": external_job_id} if external_job_id else {}
+                    extra = {"elastic_blast_job_id": runtime_job_id} if runtime_job_id else {}
                     _BLAST_EXPORTS._update_state(
                         row.job_id,
                         "completed",
@@ -598,9 +596,7 @@ def reconcile_stale_jobs(
                             resource_group=str(rg),
                             cluster_name=str(cluster),
                         )
-                        lost_after_recovery = external_missing or (
-                            k8s_missing and external_active
-                        )
+                        lost_after_recovery = external_missing or (k8s_missing and external_active)
                         if not admission.get("allowed") or not lost_after_recovery:
                             summary["untouched"] += 1
                             continue
@@ -608,7 +604,7 @@ def reconcile_stale_jobs(
                     if _blast._has_blast_success_marker(
                         storage_account,
                         str(row.job_id),
-                        external_job_id,
+                        runtime_job_id,
                     ):
                         _blast._update_state(
                             row.job_id,

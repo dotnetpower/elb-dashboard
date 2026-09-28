@@ -534,7 +534,16 @@ def _compute_blast_jobs_response(
                     "external_degraded_message": _external_degraded_message(exc, reason),
                 }
 
-    jobs.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)
+    # Use the exact immutable keyset ordering that backs ``next_cursor``.
+    # Sorting by created_at alone leaves equal-timestamp local/external rows in
+    # merge insertion order, so a cursor boundary can duplicate or omit a tie
+    # on the next page.
+    jobs.sort(
+        key=lambda job: row_key(
+            str(job.get("created_at") or ""),
+            str(job.get("job_id") or ""),
+        )
+    )
     has_more = len(jobs) > limit
     page_jobs = jobs[:limit]
     # Keyset cursor for the NEXT page: the (created_at, job_id) of the last row

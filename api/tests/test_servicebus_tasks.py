@@ -1864,8 +1864,15 @@ def test_dlq_response_is_durable_and_backed_up_before_complete(
         lambda record: backups.append(record) or True,
     )
 
-    def drain(_cfg: Any, handler: Any, *, max_messages: int) -> Any:
+    def drain(
+        _cfg: Any,
+        handler: Any,
+        *,
+        max_messages: int,
+        deadline_monotonic: float,
+    ) -> Any:
         assert max_messages == sb_tasks._DLQ_RESPONSE_MAX_MESSAGES
+        assert deadline_monotonic > sb_tasks.time.monotonic()
         action = handler(
             _msg(
                 {

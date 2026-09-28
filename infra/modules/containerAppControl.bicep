@@ -485,7 +485,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
               type: 'Readiness'
               httpGet: { path: '/api/health', port: 8080, scheme: 'HTTP' }
               periodSeconds: 10
-              timeoutSeconds: 3
+              timeoutSeconds: 5
               failureThreshold: 3
             }
           ]
@@ -848,7 +848,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
               type: 'Readiness'
               httpGet: { path: '/healthz', port: 7682, scheme: 'HTTP' }
               periodSeconds: 10
-              timeoutSeconds: 3
+              timeoutSeconds: 5
               failureThreshold: 3
             }
           ]

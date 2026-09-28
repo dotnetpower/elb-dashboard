@@ -22,6 +22,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from billiard.exceptions import SoftTimeLimitExceeded
 from celery import shared_task
 
 LOGGER = logging.getLogger(__name__)
@@ -48,6 +49,8 @@ def _celery_task_ids(celery_app: Any) -> set[str] | None:
         active = inspector.active() or {}
         reserved = inspector.reserved() or {}
         scheduled = inspector.scheduled() or {}
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         LOGGER.warning("oracle Celery ownership inspection failed reason=%s", type(exc).__name__)
         return None
@@ -215,6 +218,8 @@ def reconcile_oracle_dispatches() -> dict[str, Any]:
                             phase="completed",
                             error_code="",
                         )
+                    except SoftTimeLimitExceeded:
+                        raise
                     except Exception as exc:
                         LOGGER.warning(
                             "oracle current-only JobState repair failed job_id=%s reason=%s",
@@ -251,6 +256,8 @@ def reconcile_oracle_dispatches() -> dict[str, Any]:
                                 (terminal_run or {}).get("error_code") or "oracle_recovered_failure"
                             ),
                         )
+                    except SoftTimeLimitExceeded:
+                        raise
                     except Exception as exc:
                         LOGGER.warning(
                             "oracle terminal JobState repair failed job_id=%s reason=%s",
@@ -317,6 +324,8 @@ def reconcile_oracle_dispatches() -> dict[str, Any]:
                         payload=payload,
                         now=datetime.now(UTC),
                     )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception as exc:
                     # Every proof is positive. An ARM/Kubernetes/Storage/Celery
                     # uncertainty preserves the existing execution claim.
@@ -335,9 +344,7 @@ def reconcile_oracle_dispatches() -> dict[str, Any]:
                     cluster_name=str(payload["cluster_name"]),
                     db_name=str(payload["db_name"]),
                     image=str(payload["image"]),
-                    requested_source_version=str(
-                        payload.get("requested_source_version") or ""
-                    ),
+                    requested_source_version=str(payload.get("requested_source_version") or ""),
                     owner_oid=str(payload.get("requested_by") or ""),
                     tenant_id=str(getattr(row, "tenant_id", "") or ""),
                     automatic=automatic,
@@ -359,6 +366,8 @@ def reconcile_oracle_dispatches() -> dict[str, Any]:
                     "reason": getattr(exc, "code", type(exc).__name__),
                 }
             )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             LOGGER.warning(
                 "oracle dispatch reconcile failed job_id=%s reason=%s",

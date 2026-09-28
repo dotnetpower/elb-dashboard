@@ -35,7 +35,7 @@ from api.services.job_logs.k8s import (
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TAIL_LINES = 200
-LAST_OUTPUT_MAX_CHARS = 6_000
+LAST_OUTPUT_MAX_CHARS = 2_000
 CHUNK_EVENT_COUNT = 100
 LOG_NAMESPACE = "default"
 

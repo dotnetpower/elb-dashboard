@@ -255,8 +255,8 @@ celery_app.conf.update(
         # delayed tick before the next hourly tick can queue behind it.
         "blast-reconcile-time-index": {
             "task": "api.tasks.blast.reconcile_time_index",
-            "schedule": float(os.environ.get("CELERY_BEAT_TIME_INDEX_RECONCILE_SECONDS", "3600")),
-            "options": {"queue": "reconcile", "expires": 3300.0},
+            "schedule": float(os.environ.get("CELERY_BEAT_TIME_INDEX_RECONCILE_SECONDS", "900")),
+            "options": {"queue": "reconcile", "expires": 300.0},
         },
         "upgrade-check-latest": {
             "task": "api.tasks.upgrade.check_latest",
@@ -326,7 +326,7 @@ celery_app.conf.update(
             "options": {
                 "queue": "servicebus",
                 "expires": float(
-                    os.environ.get("CELERY_BEAT_SERVICEBUS_PUBLISH_EXPIRES_SECONDS", "90")
+                    os.environ.get("CELERY_BEAT_SERVICEBUS_PUBLISH_EXPIRES_SECONDS", "25")
                 ),
             },
         },
@@ -346,13 +346,13 @@ celery_app.conf.update(
             "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_DLQ_RESPONSE_SECONDS", "60")),
             "options": {
                 "queue": "servicebus",
-                "expires": 120.0,
+                "expires": 55.0,
             },
         },
         "servicebus-dlq-cleanup": {
             "task": "api.tasks.servicebus.dlq_cleanup",
             "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_DLQ_CLEANUP_SECONDS", "3600")),
-            "options": {"queue": "servicebus"},
+            "options": {"queue": "servicebus", "expires": 300.0},
         },
         # Age-based result retention. No-op every tick unless STORAGE_DFS_ENABLED
         # is on AND BLAST_RESULT_RETENTION_DAYS > 0 (default 0 = disabled), so

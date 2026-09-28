@@ -3049,9 +3049,7 @@ def test_aggregate_split_merge_reports_preserves_sequence_diversity() -> None:
         3,
     ]
     assert report["sequence_group_counts_truncated"] is False
-    assert all(
-        "must_not_be_copied" not in item for item in report["sequence_group_counts"]
-    )
+    assert all("must_not_be_copied" not in item for item in report["sequence_group_counts"])
     assert report["candidate_pool_saturation_details"] == [
         {
             "source_shard": "01",
@@ -3069,19 +3067,22 @@ def test_aggregate_split_merge_reports_preserves_sequence_diversity() -> None:
     assert report["merge_disk_available_bytes_after"] == 898
     assert report["merge_disk_pressure_warning"] is True
     assert report["candidate_pool_saturation_details_truncated"] is False
-    assert [
-        child["candidate_pool_size_requested_per_shard"] for child in report["children"]
-    ] == [4, 4]
-    assert [
-        child["candidate_pool_size_applied_per_shard"] for child in report["children"]
-    ] == [4, 4]
+    assert [child["candidate_pool_size_requested_per_shard"] for child in report["children"]] == [
+        4,
+        4,
+    ]
+    assert [child["candidate_pool_size_applied_per_shard"] for child in report["children"]] == [
+        4,
+        4,
+    ]
     assert [child["observed_pool_complete"] for child in report["children"]] == [
         True,
         False,
     ]
-    assert [
-        child["sequence_group_counts_truncated"] for child in report["children"]
-    ] == [False, False]
+    assert [child["sequence_group_counts_truncated"] for child in report["children"]] == [
+        False,
+        False,
+    ]
 
 
 def test_aggregate_split_merge_reports_normalizes_child_metadata() -> None:
@@ -4788,10 +4789,9 @@ def test_reconcile_external_k8s_completion_requires_finalizer_marker(
     monkeypatch.setattr(
         blast,
         "_has_blast_success_marker",
-        lambda storage, job_id, runtime_identity="": marker_calls.append(
-            (storage, job_id, runtime_identity)
-        )
-        or marker_ready,
+        lambda storage, job_id, runtime_identity="": (
+            marker_calls.append((storage, job_id, runtime_identity)) or marker_ready
+        ),
     )
 
     summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=99999999)
@@ -4849,9 +4849,7 @@ def test_backfill_completed_runtime_metrics_updates_missing_container_metrics(
     summary = blast.backfill_completed_runtime_metrics.run(limit=1)
 
     assert summary == {"scanned": 1, "backfilled": 1, "skipped": 0, "errors": 0}
-    assert repo.completed_calls == [
-        {"job_type": "blast", "limit": 1, "since_seconds": 7_200}
-    ]
+    assert repo.completed_calls == [{"job_type": "blast", "limit": 1, "since_seconds": 7_200}]
     assert repo.updates[0][1]["status"] == "completed"
     assert repo.updates[0][1]["phase"] == "completed"
     assert repo.updates[0][1]["updated_at"] == "2026-05-20T00:00:00+00:00"
@@ -5149,12 +5147,16 @@ def test_reconcile_fails_external_row_lost_after_newer_cluster_lifecycle(
     repo = _FakeReconcileRepo(
         [
             _StaleRow(
-                job_id="ext-lifecycle-lost",
+                job_id="abcdef123456",
                 task_id="",
                 updated_at="2025-01-01T00:00:00+00:00",
                 created_at="2025-01-01T00:00:00+00:00",
                 payload={
-                    "external": {"job_id": _RUNTIME_ID},
+                    "external": {
+                        "job_id": "abcdef123456",
+                        "elb_job_id": _RUNTIME_ID,
+                        "submission_source": "external_api",
+                    },
                     "elastic_blast_job_id": _RUNTIME_ID,
                 },
                 subscription_id="sub-1",
@@ -5180,7 +5182,7 @@ def test_reconcile_fails_external_row_lost_after_newer_cluster_lifecycle(
     monkeypatch.setattr(
         "api.services.external_blast.get_job",
         lambda *_args, **_kwargs: {
-            "job_id": _RUNTIME_ID,
+            "job_id": "abcdef123456",
             "status": "running",
         },
     )
@@ -5355,7 +5357,7 @@ def test_reconcile_worker_lost_keeps_plain_code_when_cluster_healthy(
     assert repo.updates[0][1]["error_code"] == "worker_lost"
 
 
-def test_reconcile_logs_external_refresh_http_detail(
+def test_reconcile_does_not_send_runtime_id_to_openapi_status(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -5383,16 +5385,8 @@ def test_reconcile_logs_external_refresh_http_detail(
             self.status = "PENDING"
             self.result = None
 
-    def fail_get_job(job_id: str, **_kwargs: object) -> dict[str, object]:
-        assert job_id == _RUNTIME_ID
-        raise HTTPException(
-            400,
-            detail={
-                "code": "openapi_http_400",
-                "message": "job id is not known yet",
-                "upstream_status": 400,
-            },
-        )
+    def fail_get_job(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("dashboard runtime ids must not be sent to the sibling status API")
 
     monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
     _disable_k8s_reconcile(monkeypatch)
@@ -5406,9 +5400,91 @@ def test_reconcile_logs_external_refresh_http_detail(
     summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=99999999)
 
     assert summary["untouched"] == 1
-    assert "external refresh failed job_id=j5" in caplog.text
-    assert "status_code=400" in caplog.text
-    assert "job id is not known yet" in caplog.text
+    assert "external refresh failed" not in caplog.text
+
+
+def test_reconcile_external_status_uses_short_openapi_job_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recent = "2026-05-20T00:00:00+00:00"
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="abcdef123456",
+                task_id="task-external",
+                updated_at=recent,
+                created_at=recent,
+                payload={
+                    "subscription_id": "sub-1",
+                    "resource_group": "rg-elb",
+                    "cluster_name": "elb-cluster",
+                    "elastic_blast_job_id": _RUNTIME_ID,
+                    "external": {
+                        "job_id": "abcdef123456",
+                        "submission_source": "external_api",
+                    },
+                },
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "PENDING"
+            self.result = None
+
+    observed: list[str] = []
+
+    def missing_get_job(job_id: str, **_kwargs: object) -> dict[str, object]:
+        observed.append(job_id)
+        raise HTTPException(404, detail={"code": "not_found"})
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+    _disable_k8s_reconcile(monkeypatch)
+    monkeypatch.setattr(
+        "api.routes._blast_shared._openapi_client_kwargs_from_cluster",
+        lambda *_args: {"base_url": "http://openapi.test"},
+    )
+    monkeypatch.setattr("api.services.external_blast.get_job", missing_get_job)
+
+    summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=99999999)
+
+    assert observed == ["abcdef123456"]
+    assert summary["untouched"] == 1
+
+
+def test_openapi_reconcile_id_rejects_servicebus_placeholder() -> None:
+    row = _StaleRow(
+        job_id="abcdef123456",
+        payload={
+            "placeholder": True,
+            "submission_source": "servicebus",
+        },
+    )
+
+    assert blast._openapi_reconcile_job_id(row) == ""
+
+
+def test_openapi_reconcile_id_accepts_legacy_external_row() -> None:
+    row = _StaleRow(
+        job_id="abcdef123456",
+        payload={"external": {"job_id": "abcdef123456"}},
+    )
+
+    assert blast._openapi_reconcile_job_id(row) == "abcdef123456"
+
+
+def test_openapi_reconcile_id_rejects_explicit_dashboard_source() -> None:
+    row = _StaleRow(
+        job_id="abcdef123456",
+        payload={
+            "submission_source": "dashboard",
+            "external": {"job_id": "abcdef123456"},
+        },
+    )
+
+    assert blast._openapi_reconcile_job_id(row) == ""
 
 
 def test_reconcile_skips_external_refresh_without_elastic_job_id(

@@ -556,6 +556,29 @@ def _sync_external_jobs_to_table(
                     )
                     if isinstance(_stored_qm, dict) and _stored_qm:
                         ext["query_meta"] = _stored_qm
+            if str(getattr(_existing_for_source, "status", "") or "") == "deleted":
+                tombstoned.add(job_id)
+                continue
+            _stored_runtime_id = canonical_elastic_blast_job_id(
+                getattr(_existing_for_source, "elastic_blast_job_id", "")
+            )
+            if (
+                fresh_elastic_blast_job_id
+                and _stored_runtime_id
+                and fresh_elastic_blast_job_id != _stored_runtime_id
+            ):
+                _log_runtime_identity_conflict(
+                    job_id,
+                    _stored_runtime_id,
+                    fresh_elastic_blast_job_id,
+                )
+                # Fail closed for both persistence and this request's
+                # projection. A reused/corrupt sibling short id must not make a
+                # different runtime generation change the durable row or UI.
+                ext["status"] = str(getattr(_existing_for_source, "status", "") or "")
+                ext["phase"] = str(getattr(_existing_for_source, "phase", "") or "")
+                ext["elb_job_id"] = _stored_runtime_id
+                continue
         # Direct API submits create no durable row at submit time, so fall back
         # to the ephemeral remember store keyed by the openapi job id.
         if not isinstance(ext.get("config_snapshot"), dict) or not ext.get("config_snapshot"):
@@ -706,16 +729,6 @@ def _sync_external_jobs_to_table(
                 )
                 if fresh_elastic_blast_job_id and not stored_elastic_blast_job_id:
                     should_backfill_identity = True
-                elif (
-                    fresh_elastic_blast_job_id
-                    and stored_elastic_blast_job_id
-                    and fresh_elastic_blast_job_id != stored_elastic_blast_job_id
-                ):
-                    _log_runtime_identity_conflict(
-                        job_id,
-                        stored_elastic_blast_job_id,
-                        fresh_elastic_blast_job_id,
-                    )
                 status_changed = bool(
                     ext_status and (ext_status != cur_status or ext_phase != cur_phase)
                 )

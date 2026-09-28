@@ -13,7 +13,9 @@ Validation: `uv run pytest -q api/tests/test_reconcile_oracle_dispatches.py`.
 
 from __future__ import annotations
 
+import ast
 import importlib
+import inspect
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -23,9 +25,27 @@ from api.tasks.storage.reconcile_oracle_dispatches import (
     reconcile_oracle_dispatches,
 )
 
-_RECONCILE_MODULE = importlib.import_module(
-    "api.tasks.storage.reconcile_oracle_dispatches"
-)
+_RECONCILE_MODULE = importlib.import_module("api.tasks.storage.reconcile_oracle_dispatches")
+
+
+def test_oracle_reconciler_broad_catches_propagate_soft_deadline() -> None:
+    tree = ast.parse(inspect.getsource(_RECONCILE_MODULE))
+    missing: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        caught_names: set[str] = set()
+        for handler in node.handlers:
+            if isinstance(handler.type, ast.Name):
+                caught_names.add(handler.type.id)
+            elif isinstance(handler.type, ast.Tuple):
+                caught_names.update(
+                    item.id for item in handler.type.elts if isinstance(item, ast.Name)
+                )
+        if "Exception" in caught_names and "SoftTimeLimitExceeded" not in caught_names:
+            missing.append(node.lineno)
+
+    assert missing == [], f"broad catches swallow SoftTimeLimitExceeded at lines {missing}"
 
 
 def _payload() -> dict[str, object]:
@@ -197,9 +217,7 @@ def test_reconciler_redelivers_completed_worker_loss_orphan(
     result = reconcile_oracle_dispatches.run()
 
     assert len(calls) == 2
-    assert result["accepted"] == [
-        {"job_id": "oracle-job-1", "run_id": "run-1", "status": "queued"}
-    ]
+    assert result["accepted"] == [{"job_id": "oracle-job-1", "run_id": "run-1", "status": "queued"}]
 
 
 def test_reconciler_processes_oldest_rows_first(

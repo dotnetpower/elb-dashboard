@@ -313,6 +313,12 @@ def _apply_to_jobstate(
             stored_elastic_blast_job_id,
             incoming_elastic_blast_job_id,
         )
+        return {
+            "synced": False,
+            "reason": "runtime_identity_conflict",
+            "status": cur_status,
+            "runtime_identity": stored_elastic_blast_job_id,
+        }
 
     # Terminal rows are immutable against NON-terminal events. The sibling fires
     # webhooks with a 3-retry exponential backoff, so a ``running``/``submitted``

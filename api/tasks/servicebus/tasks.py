@@ -357,7 +357,14 @@ _PUBLISH_BUDGET_SECONDS = max(
     min(float(os.environ.get("SERVICEBUS_PUBLISH_BUDGET_SECONDS", "40")), 45.0),
 )
 _OUTBOX_MAX_EVENTS = int(os.environ.get("SERVICEBUS_OUTBOX_MAX_EVENTS", "200"))
-_DLQ_RESPONSE_MAX_MESSAGES = int(os.environ.get("SERVICEBUS_DLQ_RESPONSE_MAX_MESSAGES", "100"))
+_DLQ_RESPONSE_MAX_MESSAGES = max(
+    1,
+    min(int(os.environ.get("SERVICEBUS_DLQ_RESPONSE_MAX_MESSAGES", "16")), 32),
+)
+_DLQ_RESPONSE_BUDGET_SECONDS = max(
+    5.0,
+    min(float(os.environ.get("SERVICEBUS_DLQ_RESPONSE_BUDGET_SECONDS", "70")), 80.0),
+)
 # Give-up deadline for a bridge whose sibling job never reaches a terminal
 # status — without it a permanently-stuck job's row would stay "active" forever
 # and be polled every tick, growing the active set without bound (liveness).
@@ -868,12 +875,7 @@ def _record_transition_trace(
                         status="failed",
                         phase="failed",
                         error_code=str(
-                            sanitise(
-                                str(
-                                    (error or {}).get("code")
-                                    or "servicebus_terminal_failed"
-                                )
-                            )
+                            sanitise(str((error or {}).get("code") or "servicebus_terminal_failed"))
                         )[:120],
                     )
             except SoftTimeLimitExceeded:
@@ -2996,6 +2998,8 @@ def stage_operator_purge_response_and_backup(
 def _reconcile_dead_letter_responses(cfg: ServiceBusConfig) -> dict[str, int]:
     """Emit one terminal response and audit backup for every DLQ request."""
 
+    deadline = time.monotonic() + _DLQ_RESPONSE_BUDGET_SECONDS
+
     def handle(msg: ParsedMessage) -> MessageAction:
         if not _stage_dead_letter_response_and_backup(cfg, msg):
             return MessageAction.ABANDON
@@ -3005,6 +3009,7 @@ def _reconcile_dead_letter_responses(cfg: ServiceBusConfig) -> dict[str, int]:
         cfg,
         handle,
         max_messages=_DLQ_RESPONSE_MAX_MESSAGES,
+        deadline_monotonic=deadline,
     )
     return {
         "received": stats.received,
@@ -3335,7 +3340,11 @@ def _dlq_cleanup(cfg: ServiceBusConfig) -> dict[str, Any]:
     }
 
 
-@shared_task(name="api.tasks.servicebus.dlq_cleanup")
+@shared_task(
+    name="api.tasks.servicebus.dlq_cleanup",
+    soft_time_limit=120,
+    time_limit=150,
+)
 @skip_tick_on_transient_infra
 def dlq_cleanup() -> dict[str, Any]:
     """Enforce the dead-letter retention policy (backup-then-delete)."""

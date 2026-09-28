@@ -74,6 +74,7 @@ def test_init_calls_distro_when_connection_string_present(
     assert calls[0]["logger_name"] == "api"
     assert calls[0]["instrumentation_options"] == {"fastapi": {"enabled": False}}
     assert calls[0]["enable_live_metrics"] is True
+    assert calls[0]["disable_metrics"] is False
     assert "disable_logging" not in calls[0]
     assert calls[0]["resource"].attributes["service.name"] == "elb-api"
     assert calls[0]["resource"].attributes["service.namespace"] == "elb-dashboard"
@@ -147,6 +148,30 @@ def test_worker_live_metrics_disabled_by_default(
     # the boot cost that crash-loops the worker on its 0.5 vCPU budget.
     assert telemetry.init_telemetry("worker") is True
     assert calls and calls[0]["enable_live_metrics"] is False
+    assert calls[0]["disable_metrics"] is True
+
+
+def test_worker_metrics_explicit_enable_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "APPLICATIONINSIGHTS_CONNECTION_STRING",
+        "InstrumentationKey=abc;IngestionEndpoint=https://example.local/",
+    )
+    monkeypatch.setenv("AZURE_MONITOR_ENABLE_BACKGROUND_METRICS", "true")
+    calls: list[dict[str, Any]] = []
+
+    import azure.monitor.opentelemetry as distro
+
+    monkeypatch.setattr(
+        distro,
+        "configure_azure_monitor",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    telemetry = _fresh_telemetry_module(monkeypatch)
+
+    assert telemetry.init_telemetry("worker") is True
+    assert calls[0]["disable_metrics"] is False
 
 
 def test_worker_live_metrics_explicit_enable_override(

@@ -15,11 +15,33 @@ Validation: `uv run pytest -q api/tests/test_oracle_task.py`.
 
 from __future__ import annotations
 
+import ast
+import inspect
 from typing import Any
 
 import pytest
 from api.services.db.oracle_build import OracleBuildContext
 from api.tasks.storage import oracle as oracle_task
+
+
+def test_oracle_task_broad_catches_propagate_soft_deadline() -> None:
+    tree = ast.parse(inspect.getsource(oracle_task))
+    missing: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        caught_names: set[str] = set()
+        for handler in node.handlers:
+            if isinstance(handler.type, ast.Name):
+                caught_names.add(handler.type.id)
+            elif isinstance(handler.type, ast.Tuple):
+                caught_names.update(
+                    item.id for item in handler.type.elts if isinstance(item, ast.Name)
+                )
+        if "Exception" in caught_names and "SoftTimeLimitExceeded" not in caught_names:
+            missing.append(node.lineno)
+
+    assert missing == [], f"broad catches swallow SoftTimeLimitExceeded at lines {missing}"
 
 
 class _Task:
@@ -243,9 +265,7 @@ def test_oracle_job_log_failure_does_not_block_cleanup(
         oracle_task.build_db_order_oracle.run(**_kwargs())
 
     assert len(observations["cleanup"]) == 1
-    assert observations["failures"][0]["error"] == (
-        "failed Jobs: oracle-core-nt-01-run-1"
-    )
+    assert observations["failures"][0]["error"] == ("failed Jobs: oracle-core-nt-01-run-1")
 
 
 def test_oracle_task_times_out_and_cleans_jobs(

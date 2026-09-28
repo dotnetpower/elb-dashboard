@@ -18,8 +18,13 @@
 
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+. "$REPO_ROOT/scripts/dev/lib-env.sh"
+load_azd_env
+
 # ---------------------------------------------------------------------------
-# Inputs from azd outputs (loaded automatically into env by `azd up`).
+# Inputs from azd outputs (inherited from `azd up` or loaded above for a
+# standalone retry after a failed hook).
 # ---------------------------------------------------------------------------
 REQUIRED_VARS=(
   AZURE_LOCATION
@@ -45,7 +50,6 @@ for v in "${REQUIRED_VARS[@]}"; do
   fi
 done
 
-REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 . "$REPO_ROOT/scripts/dev/az-context.sh"
 
 progress() {
@@ -202,6 +206,9 @@ LOG_ANALYTICS_WORKSPACE_ID_VAL="${LOG_ANALYTICS_WORKSPACE_ID:-}"
 VITE_FEATURE_CUSTOM_DB_VAL="${VITE_FEATURE_CUSTOM_DB:-true}"
 VITE_FEATURE_LAB_TOOLS_VAL="${VITE_FEATURE_LAB_TOOLS:-true}"
 VITE_FEATURE_TERMINAL_VAL="${VITE_FEATURE_TERMINAL:-true}"
+SERVICEBUS_ENABLED_VAL="${SERVICEBUS_ENABLED:-}"
+STORAGE_DATE_LAYOUT_ENABLED_VAL="${STORAGE_DATE_LAYOUT_ENABLED:-}"
+PREPARE_DB_NCBI_DIRECT_ENABLED_VAL="${PREPARE_DB_NCBI_DIRECT_ENABLED:-false}"
 
 . "$REPO_ROOT/scripts/dev/acr-build-access.sh"
 . "$REPO_ROOT/scripts/dev/terminal-base-image.sh"
@@ -730,6 +737,9 @@ az deployment group create \
       featureCustomDb="$VITE_FEATURE_CUSTOM_DB_VAL" \
       featureLabTools="$VITE_FEATURE_LAB_TOOLS_VAL" \
       featureTerminal="$VITE_FEATURE_TERMINAL_VAL" \
+      serviceBusEnabled="$SERVICEBUS_ENABLED_VAL" \
+      storageDateLayoutEnabled="$STORAGE_DATE_LAYOUT_ENABLED_VAL" \
+      prepareDbNcbiDirectEnabled="$PREPARE_DB_NCBI_DIRECT_ENABLED_VAL" \
       applicationInsightsConnectionString="$APPLICATIONINSIGHTS_CONNECTION_STRING_VAL" \
       logAnalyticsWorkspaceId="$LOG_ANALYTICS_WORKSPACE_ID_VAL" \
       logAnalyticsWorkspaceResourceId="$LA_WS_RID_VAL" \

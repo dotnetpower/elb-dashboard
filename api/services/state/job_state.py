@@ -14,6 +14,7 @@ Validation: `uv run pytest -q api/tests/test_state_repo.py`.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 import uuid
@@ -23,6 +24,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 _JOB_SCHEMA_VERSION = 2
+_PAYLOAD_PROPERTY_UTF16_BUDGET_BYTES = 60 * 1024
+_PAYLOAD_STEP_TEXT_LIMIT = 1500
+_PAYLOAD_STEP_TEXT_FALLBACK_LIMIT = 500
 _JOBSTATE_SUMMARY_SELECT = [
     "PartitionKey",
     "RowKey",
@@ -87,6 +91,88 @@ def canonical_elastic_blast_job_id(value: Any) -> str:
     if not re.fullmatch(r"job-[0-9a-f]{32}", text, re.IGNORECASE):
         return ""
     return text.lower()
+
+
+class JobStatePayloadTooLarge(ValueError):
+    """Raised when safe progress compaction cannot fit one Table property."""
+
+
+def _compact_payload_text(value: object, limit: int) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    if limit <= 0:
+        return ""
+    marker = "\n...[truncated; full output is stored in job logs]...\n"
+    available = max(0, limit - len(marker))
+    head = available // 2
+    tail = available - head
+    return f"{text[:head]}{marker}{text[-tail:] if tail else ''}"
+
+
+def _payload_utf16_size(value: str) -> int:
+    return len(value.encode("utf-16-le"))
+
+
+def serialise_jobstate_payload(payload: dict[str, Any]) -> tuple[str, bool]:
+    """Serialize a JobState payload within Azure Table's string limit.
+
+    Full command and pod output lives in append blobs/chunk artifacts. When the
+    denormalized progress snapshot grows too large, compact only those mirrored
+    text fields and retain machine state, configuration, and provenance.
+    """
+    raw = json.dumps(payload, default=str, separators=(",", ":"))
+    if _payload_utf16_size(raw) <= _PAYLOAD_PROPERTY_UTF16_BUDGET_BYTES:
+        return raw, False
+
+    compacted = json.loads(raw)
+    progress = compacted.get("_progress")
+    steps = progress.get("steps") if isinstance(progress, dict) else None
+    if isinstance(steps, dict):
+        for step_value in steps.values():
+            if not isinstance(step_value, dict):
+                continue
+            for field in ("last_output", "output"):
+                if field in step_value:
+                    step_value[field] = _compact_payload_text(
+                        step_value[field],
+                        _PAYLOAD_STEP_TEXT_LIMIT,
+                    )
+            if "error" in step_value:
+                step_value["error"] = _compact_payload_text(step_value["error"], 1000)
+        progress["payload_compacted"] = True
+    if "error" in compacted:
+        compacted["error"] = _compact_payload_text(compacted["error"], 1000)
+
+    raw = json.dumps(compacted, default=str, separators=(",", ":"))
+    if _payload_utf16_size(raw) <= _PAYLOAD_PROPERTY_UTF16_BUDGET_BYTES:
+        return raw, True
+
+    if isinstance(steps, dict):
+        for step_value in steps.values():
+            if not isinstance(step_value, dict):
+                continue
+            # ``output`` and ``last_output`` are alternate UI fallbacks. Keep
+            # one bounded tail instead of persisting duplicate transcripts.
+            if "last_output" in step_value:
+                step_value["last_output"] = _compact_payload_text(
+                    step_value["last_output"],
+                    _PAYLOAD_STEP_TEXT_FALLBACK_LIMIT,
+                )
+                step_value.pop("output", None)
+            elif "output" in step_value:
+                step_value["output"] = _compact_payload_text(
+                    step_value["output"],
+                    _PAYLOAD_STEP_TEXT_FALLBACK_LIMIT,
+                )
+            if "error" in step_value:
+                step_value["error"] = _compact_payload_text(step_value["error"], 500)
+    raw = json.dumps(compacted, default=str, separators=(",", ":"))
+    if _payload_utf16_size(raw) <= _PAYLOAD_PROPERTY_UTF16_BUDGET_BYTES:
+        return raw, True
+    raise JobStatePayloadTooLarge(
+        f"jobstate payload remains {_payload_utf16_size(raw)} UTF-16 bytes after compaction"
+    )
 
 
 def _resolve_payload_elastic_blast_job_id(payload: dict[str, Any] | None) -> str:
@@ -284,14 +370,11 @@ class JobState:
             # row with just a payload.
             "external_correlation_id": self.external_correlation_id
             or _resolve_external_correlation_id(self.payload),
-            "elastic_blast_job_id": canonical_elastic_blast_job_id(
-                self.elastic_blast_job_id
-            )
+            "elastic_blast_job_id": canonical_elastic_blast_job_id(self.elastic_blast_job_id)
             or _resolve_payload_elastic_blast_job_id(self.payload),
             "submission_source": self.submission_source
             or _resolve_payload_submission_source(self.payload),
-            "queue_origin": self.queue_origin
-            or _resolve_payload_queue_origin(self.payload),
+            "queue_origin": self.queue_origin or _resolve_payload_queue_origin(self.payload),
             "result_manifest": self.result_manifest or "",
             # Persist the canonical results prefix on every row so readers can
             # resolve it without reconstructing ``{job_id}/``. Defaults to the
@@ -300,9 +383,7 @@ class JobState:
             "results_prefix": self.results_prefix or f"{self.job_id}/",
         }
         if self.payload is not None:
-            import json
-
-            e["payload_json"] = json.dumps(self.payload, default=str)
+            e["payload_json"] = serialise_jobstate_payload(self.payload)[0]
         return e
 
     @classmethod

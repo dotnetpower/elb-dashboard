@@ -14,6 +14,8 @@ api/tests/test_job_artifacts.py`.
 from __future__ import annotations
 
 import logging
+import os
+from datetime import UTC, datetime
 from typing import Any
 
 from celery import shared_task
@@ -30,9 +32,45 @@ LOGGER = logging.getLogger(__name__)
 # has almost certainly evicted the pod logs anyway.
 _POD_LOG_RETRY_MAX = 3
 _POD_LOG_RETRY_COUNTDOWN_S = 60
+_POD_LOG_CAPTURE_MAX_AGE_SECONDS = max(
+    300,
+    min(int(os.environ.get("POD_LOG_CAPTURE_MAX_AGE_SECONDS", "1800")), 3600),
+)
 _RESULT_READY_RETRY_MAX = 20
 _RESULT_READY_RETRY_COUNTDOWN_S = 30
 _RECONCILE_ATTEMPT_MAX = ARTIFACT_RECONCILE_ATTEMPT_MAX
+
+
+def _pod_log_capture_window_expired(state: Any, *, now: datetime | None = None) -> bool:
+    """Return whether Kubernetes pod logs have passed their retention window."""
+    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+    progress = payload.get("_progress") if isinstance(payload, dict) else None
+    steps = progress.get("steps") if isinstance(progress, dict) else None
+    completed = steps.get("completed") if isinstance(steps, dict) else None
+    external = payload.get("external") if isinstance(payload, dict) else None
+    candidates = (
+        completed.get("completed_at") if isinstance(completed, dict) else None,
+        external.get("completed_at") if isinstance(external, dict) else None,
+        getattr(state, "updated_at", None),
+        getattr(state, "created_at", None),
+    )
+    terminal_at: datetime | None = None
+    for value in candidates:
+        if not value:
+            continue
+        try:
+            terminal_at = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if terminal_at.tzinfo is None:
+            terminal_at = terminal_at.replace(tzinfo=UTC)
+        else:
+            terminal_at = terminal_at.astimezone(UTC)
+        break
+    if terminal_at is None:
+        return False
+    current = now or datetime.now(UTC)
+    return (current - terminal_at).total_seconds() > _POD_LOG_CAPTURE_MAX_AGE_SECONDS
 
 
 def _record_pod_log_capture_state(
@@ -291,23 +329,37 @@ def finalize_job_artifacts(
             reconcile_attempts=reconcile_attempts,
         )
         pod_logs_empty = True
-        try:
-            from api.services import get_credential
-            from api.services.job_logs.persist import persist_completed_job_pod_logs
-
-            persisted = persist_completed_job_pod_logs(get_credential(), state)
-            if persisted:
-                summary["pod_logs"] = persisted
-                pod_logs_empty = False
-                # Re-read so the execution-steps snapshot picks up the merged
-                # last_output blobs we just wrote.
-                state = repo.get(job_id) or state
-        except Exception as exc:
-            LOGGER.info(
-                "finalize_job_artifacts: pod log persistence skipped job_id=%s: %s",
-                job_id,
-                type(exc).__name__,
+        pod_logs_retention_skipped = bool(
+            pod_log_attempt == 1 and _pod_log_capture_window_expired(state)
+        )
+        if pod_logs_retention_skipped:
+            summary["pod_logs"] = "retention_window_elapsed"
+            _record_pod_log_capture_state(
+                repo,
+                job_id=job_id,
+                status="skipped",
+                error_code="retention_window_elapsed",
+                runtime_identity=runtime_identity,
+                attempt=pod_log_attempt,
             )
+        else:
+            try:
+                from api.services import get_credential
+                from api.services.job_logs.persist import persist_completed_job_pod_logs
+
+                persisted = persist_completed_job_pod_logs(get_credential(), state)
+                if persisted:
+                    summary["pod_logs"] = persisted
+                    pod_logs_empty = False
+                    # Re-read so the execution-steps snapshot picks up the merged
+                    # last_output blobs we just wrote.
+                    state = repo.get(job_id) or state
+            except Exception as exc:
+                LOGGER.info(
+                    "finalize_job_artifacts: pod log persistence skipped job_id=%s: %s",
+                    job_id,
+                    type(exc).__name__,
+                )
         step_state = write_execution_steps_snapshot(state)
         if step_state is not None:
             summary["execution_steps"] = "ready"
@@ -380,7 +432,9 @@ def finalize_job_artifacts(
         # schedule a delayed self-retry so the snapshot can be re-built with
         # the trailing tail once pods finish writing. Cap the retries — past
         # that point the K8s log GC has likely evicted the pod logs anyway.
-        if not pod_logs_empty:
+        if pod_logs_retention_skipped:
+            pass
+        elif not pod_logs_empty:
             _record_pod_log_capture_state(
                 repo,
                 job_id=job_id,
