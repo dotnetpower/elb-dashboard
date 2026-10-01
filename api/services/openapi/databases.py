@@ -16,9 +16,10 @@ Risky contracts: The detail projection mirrors the ``elb-openapi``
 ``DatabaseMetadata`` field set (``molecule_type`` in ``{dna, protein}`` decided by
 WHICH suffix blob exists — not from the catalogue's coarse ``.njs`` enrichment,
 which leaves single-volume DBs like 16S/18S/ITS with ``molecule_type=null`` — plus
-``molecule_label``, ``snapshot`` from the ``files[]`` path regex, ``cached_at``,
-byte/sequence counts) so an external caller can swap host without reshaping its
-parsing.
+``molecule_label``, ``snapshot``, ``last_updated``, ``cached_at``, byte/sequence
+counts). Active-generation metadata must overlay its snapshot, release timestamp,
+and execution-owned counts together so an external caller can swap host without
+reshaping its parsing.
 Validation: ``uv run pytest -q api/tests/test_aks_openapi_databases.py``.
 """
 
@@ -199,7 +200,7 @@ def get_database(
 def _overlay_active_generation(
     projected: dict[str, Any], account_name: str, db_name: str
 ) -> dict[str, Any]:
-    """Overlay execution-owned counts when an active generation is available."""
+    """Overlay active snapshot, release timestamp, and execution-owned counts."""
     from api.services.blast.db_metadata import resolve_db_metadata
 
     active = resolve_db_metadata(account_name, db_name)
@@ -210,6 +211,11 @@ def _overlay_active_generation(
     generation = active.get("active_generation")
     generation_id = str(generation.get("id") or "").strip() if isinstance(generation, dict) else ""
     source_version = generation_id or str(active.get("source_version") or "").strip()
+    source_release_at = (
+        _str_or_none(generation.get("source_release_at"))
+        if isinstance(generation, dict)
+        else None
+    ) or _str_or_none(active.get("source_release_at"))
     field_map = {
         "number_of_sequences": ("total_sequences", "number_of_sequences", "number-of-sequences"),
         "number_of_letters": ("total_letters", "number_of_letters", "number-of-letters"),
@@ -220,6 +226,8 @@ def _overlay_active_generation(
     out = dict(projected)
     if source_version:
         out["snapshot"] = source_version
+    if source_release_at:
+        out["last_updated"] = source_release_at
     for target, sources in field_map.items():
         for source in sources:
             value = _raw_int(active.get(source))

@@ -159,7 +159,10 @@ def test_get_database_overlays_active_generation_counts(
     monkeypatch.setattr(
         "api.services.blast.db_metadata.resolve_db_metadata",
         lambda *_args: {
-            "active_generation": {"id": "ncbi-direct-20260819-cab30d18c360"},
+            "active_generation": {
+                "id": "ncbi-direct-20260819-cab30d18c360",
+                "source_release_at": "2026-08-19T00:00:00+00:00",
+            },
             "total_sequences": 130_155_243,
             "total_letters": 998_069_435_926,
         },
@@ -169,8 +172,29 @@ def test_get_database_overlays_active_generation_counts(
 
     assert meta is not None
     assert meta["snapshot"] == "ncbi-direct-20260819-cab30d18c360"
+    assert meta["last_updated"] == "2026-08-19T00:00:00+00:00"
     assert meta["number_of_sequences"] == 130_155_243
     assert meta["number_of_letters"] == 998_069_435_926
+
+
+def test_active_generation_last_updated_falls_back_to_top_level_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_db_metadata",
+        lambda *_args: {
+            "active_generation": {"id": "ncbi-direct-20260819-cab30d18c360"},
+            "source_release_at": "2026-08-19T00:00:00+00:00",
+        },
+    )
+
+    meta = db_svc._overlay_active_generation(
+        {"last_updated": "2026-06-12T14:34:25"},
+        "stgacct",
+        "core_nt",
+    )
+
+    assert meta["last_updated"] == "2026-08-19T00:00:00+00:00"
 
 
 def test_get_database_falls_through_to_prot(monkeypatch: pytest.MonkeyPatch) -> None:
