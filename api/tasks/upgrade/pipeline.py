@@ -17,11 +17,13 @@ Key entry points: `start_upgrade_inline`, `execute_upgrade_inline`,
   `STATE_TRANSITION_TIMELINE`.
 Risky contracts: `start_upgrade_inline` and the pipeline are the single
   funnel through which concurrent operators are serialised via state
-    CAS. The workspace's verified build number must reach every image build so
-    the frontend stamp identifies the target commit. `execute_upgrade_inline`
-    commits `state=rolling_out` BEFORE the ARM PATCH so the row survives the
-    producing revision being torn down — the reconciler on the freshly booted
-    revision then finalises the state.
+        CAS. The workspace's verified build number must reach every image build so
+        the frontend stamp identifies the target commit. Temporary ACR build access
+        must be restored before any Container App image PATCH; a failed restore is
+        terminal and fail-closed. `execute_upgrade_inline` commits
+        `state=rolling_out` BEFORE the ARM PATCH so the row survives the producing
+        revision being torn down — the reconciler on the freshly booted revision
+        then finalises the state.
 Validation: `uv run pytest -q api/tests/test_upgrade_task.py`.
 """
 
@@ -29,6 +31,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -102,15 +106,93 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def _open_platform_acr_build_access() -> object:
+    """Lease temporary public access for Microsoft-managed ACR build agents."""
+    from api.services import get_credential
+    from api.services.acr_build_access import open_build_access
+
+    subscription_id = os.environ.get(aca_template.AZURE_SUBSCRIPTION_ID_ENV, "").strip()
+    resource_group = (
+        os.environ.get("PLATFORM_ACR_RESOURCE_GROUP", "").strip()
+        or os.environ.get(aca_template.AZURE_RESOURCE_GROUP_ENV, "").strip()
+    )
+    registry_name = image_builder._acr_name()
+    if not subscription_id or not resource_group:
+        raise RuntimeError("platform ACR scope is incomplete")
+    return open_build_access(
+        get_credential(),
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        registry_name=registry_name,
+    )
+
+
+def _restore_platform_acr_build_access(lease: object) -> bool:
+    """Restore an ACR build-access lease without leaking provider details."""
+    from api.services import get_credential
+    from api.services.acr_build_access import BuildAccessLease, restore_build_access
+
+    if not isinstance(lease, BuildAccessLease):
+        return False
+    try:
+        return restore_build_access(get_credential(), lease)
+    except Exception as exc:
+        LOGGER.error(
+            "upgrade.execute: ACR build access restore raised error=%s",
+            type(exc).__name__,
+        )
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Discovery (beat-driven + sync from the SPA's "Check remote" button).
 # ---------------------------------------------------------------------------
 
 
 def _record_running_version(s: state.UpgradeState) -> None:
-    """Keep the row's running_version in sync with the api's __version__."""
-    if s.running_version != _api.__version__:
-        s.running_version = _api.__version__
+    """Sync runtime identity and invalidate stale out-of-band snapshots."""
+    running_version = _api.__version__
+    previous_version = s.running_version
+    current_images = s.current_images()
+    expected_tag = f":v{running_version}"
+    images_match = bool(current_images) and all(
+        image_ref.endswith(expected_tag) for image_ref in current_images.values()
+    )
+    stale_terminal_snapshot = s.state in _RESTARTABLE_START_STATES and (
+        (bool(previous_version) and previous_version != running_version)
+        or (bool(current_images) and not images_match)
+    )
+
+    s.running_version = running_version
+    commit_match = re.search(r"-commit\.([0-9a-f]{7,40})$", running_version, re.IGNORECASE)
+    if commit_match:
+        s.running_sha = commit_match.group(1).lower()
+    elif previous_version and previous_version != running_version:
+        s.running_sha = ""
+    if not stale_terminal_snapshot:
+        return
+
+    s.state = state.STATE_IDLE
+    s.running_revision = ""
+    s.current_images_json = ""
+    s.target_version = ""
+    s.target_sha = ""
+    s.target_kind = "release"
+    s.job_id = ""
+    s.started_by_oid = ""
+    s.started_at = ""
+    s.phase_detail = "out-of-band deployment detected"
+    s.phase_progress = 0
+    s.build_log_blob = ""
+    s.rollback_target_json = ""
+    s.rollback_available_until = ""
+    s.green_revision = ""
+    s.blue_revision = ""
+    s.confirm_deadline = ""
+    s.traffic_serving = ""
+    s.validating_started_at = ""
+    s.rolling_out_started_at = ""
+    s.idempotency_key = ""
 
 
 def _set_latest(
@@ -410,41 +492,74 @@ def execute_upgrade_inline(
     except state.StateTransitionRefused as exc:
         return _fail_pre(job_id, f"state moved during fetch: {exc.current}")
 
+    try:
+        state.update_state(
+            lambda s: setattr(s, "phase_detail", "opening ACR build access")
+        )
+    except state.RowEtagMismatch:
+        LOGGER.warning("upgrade.execute: stale etag on build-access progress write")
+    try:
+        build_access_lease = _open_platform_acr_build_access()
+    except Exception as exc:
+        return _fail_pre(
+            job_id,
+            f"ACR build access open failed: {type(exc).__name__}",
+        )
+
     # Ensure the terminal sidecar's exec Azure CLI cache has an account context
     # before the first `az acr build` (closes the entrypoint-bootstrap race
     # that otherwise fails with "Please run 'az login' to setup account.").
     image_builder.ensure_exec_az_login(runner=runner)
 
     built: list[image_builder.ImageBuildResult] = []
+    build_failure = ""
     components = ("api", "frontend", "terminal")
-    for idx, component in enumerate(components):
-        progress = 30 + int(40 * (idx / len(components)))
-        try:
-            state.update_state(
-                lambda s, c=component, p=progress: (
-                    setattr(s, "phase_detail", f"az acr build {c}"),
-                    setattr(s, "phase_progress", p),
-                    setattr(s, "build_log_blob", build_logs.blob_name(job_id, c)),
-                )[-1]
-            )
-        except state.RowEtagMismatch:
-            LOGGER.warning("upgrade.execute: stale etag on progress write; continuing")
-        try:
-            result = image_builder.build(
-                component=component,
-                target_version=target_version,
-                source_dir=workspace.target_dir,
-                job_id=job_id,
-                build_number=workspace.build_number,
-                runner=runner,
-            )
-        except image_builder.ImageBuilderError as exc:
-            return _fail_pre(
-                job_id,
-                f"az acr build {component} failed: {exc}",
-                orphan_image_refs=[r.image_ref for r in built],
-            )
-        built.append(result)
+    try:
+        for idx, component in enumerate(components):
+            progress = 30 + int(40 * (idx / len(components)))
+            try:
+                state.update_state(
+                    lambda s, c=component, p=progress: (
+                        setattr(s, "phase_detail", f"az acr build {c}"),
+                        setattr(s, "phase_progress", p),
+                        setattr(s, "build_log_blob", build_logs.blob_name(job_id, c)),
+                    )[-1]
+                )
+            except state.RowEtagMismatch:
+                LOGGER.warning("upgrade.execute: stale etag on progress write; continuing")
+            try:
+                result = image_builder.build(
+                    component=component,
+                    target_version=target_version,
+                    source_dir=workspace.target_dir,
+                    job_id=job_id,
+                    build_number=workspace.build_number,
+                    runner=runner,
+                )
+            except image_builder.ImageBuilderError as exc:
+                build_failure = f"az acr build {component} failed: {exc}"
+                break
+            built.append(result)
+    except Exception as exc:
+        LOGGER.exception("upgrade.execute: unexpected image build failure")
+        build_failure = f"unexpected image build failure: {type(exc).__name__}"
+
+    restored = _restore_platform_acr_build_access(build_access_lease)
+    if not restored:
+        detail = "ACR build access restore failed"
+        if build_failure:
+            detail = f"{detail} after {build_failure}"
+        return _fail_pre(
+            job_id,
+            detail,
+            orphan_image_refs=[r.image_ref for r in built],
+        )
+    if build_failure:
+        return _fail_pre(
+            job_id,
+            build_failure,
+            orphan_image_refs=[r.image_ref for r in built],
+        )
 
     # 3. patching — snapshot rollback target, swap template, commit
     #    state=rolling_out BEFORE the ARM PATCH so the row survives this

@@ -113,8 +113,13 @@ export function BuildLogViewer({ jobId, component, active }: Props) {
           className="glass-button"
           onClick={() => void fetchOnce()}
           title="Refresh now"
+          disabled={loading}
         >
-          <RefreshCcw size={12} strokeWidth={1.5} />
+          <RefreshCcw
+            size={12}
+            strokeWidth={1.5}
+            className={loading ? "spin" : undefined}
+          />
         </button>
         <button
           type="button"

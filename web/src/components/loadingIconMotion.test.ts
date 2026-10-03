@@ -35,13 +35,15 @@ describe("loading icon motion contract", () => {
   });
 
   it.each([
-    ["pages/apiReference/panelStates.tsx", "retrying"],
-    ["pages/BlastJobs/JobsHeader.tsx", "jobsQuery.isFetching"],
-    ["components/settings/sections/ServiceBusSection.tsx", "loading"],
-    ["pages/ServiceBusPlayground.tsx", "observed.isFetching"],
-  ])("binds the active refresh icon in %s to %s", (relativePath, stateExpression) => {
+    ["pages/apiReference/panelStates.tsx", "RefreshCw", "retrying"],
+    ["pages/BlastJobs/JobsHeader.tsx", "RefreshCw", "jobsQuery.isFetching"],
+    ["components/settings/sections/ServiceBusSection.tsx", "RefreshCw", "loading"],
+    ["pages/ServiceBusPlayground.tsx", "RefreshCw", "observed.isFetching"],
+    ["pages/UpgradePage.tsx", "RefreshCcw", "refreshing"],
+    ["components/BuildLogViewer.tsx", "RefreshCcw", "loading"],
+  ])("binds the active refresh icon in %s to %s", (relativePath, icon, stateExpression) => {
     const source = readFileSync(path.join(SRC_ROOT, relativePath), "utf8");
-    const matchingTag = iconTags(source, "RefreshCw").find(
+    const matchingTag = iconTags(source, icon).find(
       (tag) => tag.includes(stateExpression) && tag.includes("spin"),
     );
 

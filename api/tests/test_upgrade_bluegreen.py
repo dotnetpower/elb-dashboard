@@ -39,6 +39,7 @@ from api.services.upgrade import (
     state,
 )
 from api.tasks import upgrade as upgrade_task
+from api.tasks.upgrade import pipeline as upgrade_pipeline
 from api.tasks.upgrade import reconciler
 from api.tasks.upgrade import rollback as rollback_task
 
@@ -187,6 +188,14 @@ def env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     state.set_backend(state.InMemoryBackend())
     build_logs.set_backend(build_logs.InMemoryBuildLogBackend())
     history.set_backend(history.InMemoryHistoryBackend())
+    monkeypatch.setattr(
+        upgrade_pipeline, "_open_platform_acr_build_access", lambda: object()
+    )
+    monkeypatch.setattr(
+        upgrade_pipeline,
+        "_restore_platform_acr_build_access",
+        lambda _lease: True,
+    )
     acr_inventory.set_client_factory_for_tests(lambda _ep: _AlwaysExistsAcrClient())
     yield
     state.set_backend(None)

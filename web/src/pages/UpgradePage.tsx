@@ -14,7 +14,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowUpCircle, Copy, ExternalLink, History, RefreshCcw, RotateCcw, Terminal, TriangleAlert } from "lucide-react";
+import { ArrowUpCircle, Copy, ExternalLink, History, Loader2, RefreshCcw, RotateCcw, Terminal, TriangleAlert } from "lucide-react";
 
 import {
   compareSemver,
@@ -134,6 +134,11 @@ export function UpgradePage() {
   }, [refreshAll]);
 
   const phase = status ? statePhase(status.state) : "idle";
+  const upgradeBusy = submitting || phase === "active";
+  const acrBuildAccessFailure = Boolean(
+    status?.state === "failed_pre" &&
+      /ACR build access|az acr build/i.test(status.phase_detail || ""),
+  );
   // During the blue/green confirm window, rollback is an instant traffic
   // flip back to the still-warm blue revision — no ACR pull, so the ACR
   // pre-flight gate below does not apply.
@@ -361,7 +366,12 @@ export function UpgradePage() {
             onClick={() => void refreshAll()}
             disabled={refreshing}
           >
-            <RefreshCcw size={14} strokeWidth={1.5} /> Refresh
+            <RefreshCcw
+              size={14}
+              strokeWidth={1.5}
+              className={refreshing ? "spin" : undefined}
+            />{" "}
+            {refreshing ? "Refreshing…" : "Refresh"}
           </button>
           <button
             type="button"
@@ -369,7 +379,7 @@ export function UpgradePage() {
             onClick={() => void forceCheck()}
             disabled={checking}
           >
-            {checking ? "Checking…" : "Check remote"}
+            {checking && <Loader2 size={14} className="spin" />} {checking ? "Checking…" : "Check remote"}
           </button>
         </div>
       </header>
@@ -416,6 +426,22 @@ export function UpgradePage() {
         <p className="muted" style={{ margin: 0 }}>
           {status.phase_detail || "idle"}
         </p>
+        {acrBuildAccessFailure && (
+          <div
+            role="alert"
+            style={{
+              borderRadius: 6,
+              border: "1px solid var(--warning, #d97706)",
+              color: "var(--warning, #d97706)",
+              padding: "8px 10px",
+              fontSize: 12,
+            }}
+          >
+            The image build could not obtain or restore temporary ACR build access.
+            No Container App image update was applied. Review the API build log, then
+            retry the upgrade after registry access is healthy.
+          </div>
+        )}
       </section>
 
       <section className="glass-card" style={cardStack}>
@@ -440,6 +466,7 @@ export function UpgradePage() {
                 className="glass-input"
                 value={pickedTarget}
                 onChange={(e) => setPickedTarget(e.target.value)}
+                disabled={upgradeBusy}
                 style={{ flex: 1, minWidth: 220 }}
               >
                 <option value="">— pick a version —</option>
@@ -486,6 +513,7 @@ export function UpgradePage() {
                 type="checkbox"
                 checked={confirmDowntime}
                 onChange={(e) => setConfirmDowntime(e.target.checked)}
+                disabled={upgradeBusy}
               />
               <span>
                 I accept a short downtime (≈ 1 minute) while the new revision boots.
@@ -538,7 +566,16 @@ export function UpgradePage() {
               }
               onClick={() => void startUpgrade()}
             >
-              <ArrowUpCircle size={14} strokeWidth={1.6} /> Start upgrade
+              {upgradeBusy ? (
+                <Loader2 size={14} className="spin" />
+              ) : (
+                <ArrowUpCircle size={14} strokeWidth={1.6} />
+              )}{" "}
+              {submitting
+                ? "Starting…"
+                : phase === "active"
+                  ? "Upgrade in progress"
+                  : "Start upgrade"}
             </button>
             {phase === "active" && (
               <p className="muted" style={{ margin: 0 }}>

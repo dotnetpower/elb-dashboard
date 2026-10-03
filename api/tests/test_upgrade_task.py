@@ -35,6 +35,7 @@ from api.services.upgrade import (
     state,
 )
 from api.tasks import upgrade as upgrade_task
+from api.tasks.upgrade import pipeline as upgrade_pipeline
 
 
 class _FakeRunner:
@@ -143,6 +144,18 @@ def env(monkeypatch: pytest.MonkeyPatch) -> None:
     state.set_backend(state.InMemoryBackend())
     build_logs.set_backend(build_logs.InMemoryBuildLogBackend())
     history.set_backend(history.InMemoryHistoryBackend())
+    monkeypatch.setattr(
+        upgrade_pipeline,
+        "_open_platform_acr_build_access",
+        lambda: object(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        upgrade_pipeline,
+        "_restore_platform_acr_build_access",
+        lambda _lease: True,
+        raising=False,
+    )
     # ACR pre-flight stub — "every snapshot tag still resolves". Tests
     # that need to simulate retention purge override this with
     # `acr_inventory.set_client_factory_for_tests(...)` of their own.
@@ -383,6 +396,24 @@ def test_execute_without_remote_marks_failed_pre(
     assert aca.swap_calls == []
 
 
+def test_record_running_version_preserves_release_sha(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full_sha = "a" * 40
+
+    def _seed(row: state.UpgradeState) -> None:
+        row.running_version = "0.3.0"
+        row.running_sha = full_sha
+
+    state.update_state(_seed)
+    monkeypatch.setattr(upgrade_pipeline._api, "__version__", "0.3.0")
+
+    updated = state.update_state(upgrade_pipeline._record_running_version)
+
+    assert updated.running_version == "0.3.0"
+    assert updated.running_sha == full_sha
+
+
 def test_execute_build_failure_marks_failed_pre(env: None) -> None:
     after_start = _start()
     runner = _FakeRunner(build_exit=1)
@@ -396,6 +427,90 @@ def test_execute_build_failure_marks_failed_pre(env: None) -> None:
         aca=aca,
     )
     assert after_exec.state == state.STATE_FAILED_PRE
+    assert aca.swap_calls == []
+
+
+def test_execute_manages_acr_build_access_lease(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = object()
+    calls: list[tuple[str, object | None]] = []
+    monkeypatch.setattr(
+        upgrade_pipeline,
+        "_open_platform_acr_build_access",
+        lambda: calls.append(("open", None)) or lease,
+    )
+    monkeypatch.setattr(
+        upgrade_pipeline,
+        "_restore_platform_acr_build_access",
+        lambda value: calls.append(("restore", value)) or True,
+    )
+    after_start = _start()
+    aca = _FakeAca()
+
+    upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_FakeRunner(),
+        aca=aca,
+    )
+
+    assert calls == [("open", None), ("restore", lease)]
+    assert len(aca.swap_calls) == 1
+    assert aca.swap_calls[0][0] == "0.3.0"
+    assert aca.swap_calls[0][1]
+
+
+def test_execute_acr_build_access_open_failure_marks_failed_pre(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _raise() -> object:
+        raise RuntimeError("simulated ACR network failure")
+
+    monkeypatch.setattr(upgrade_pipeline, "_open_platform_acr_build_access", _raise)
+    after_start = _start()
+    runner = _FakeRunner()
+    aca = _FakeAca()
+
+    after_exec = upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=runner,
+        aca=aca,
+    )
+
+    assert after_exec.state == state.STATE_FAILED_PRE
+    assert "ACR build access open failed" in after_exec.phase_detail
+    assert runner.stream_calls == []
+    assert aca.swap_calls == []
+
+
+def test_execute_acr_build_access_restore_failure_blocks_patch(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        upgrade_pipeline,
+        "_restore_platform_acr_build_access",
+        lambda _lease: False,
+    )
+    after_start = _start()
+    aca = _FakeAca()
+
+    after_exec = upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_FakeRunner(),
+        aca=aca,
+    )
+
+    assert after_exec.state == state.STATE_FAILED_PRE
+    assert "ACR build access restore failed" in after_exec.phase_detail
     assert aca.swap_calls == []
 
 

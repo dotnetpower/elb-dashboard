@@ -23,6 +23,7 @@ from collections.abc import Iterator
 import httpx
 import pytest
 from api.services.upgrade import remote_tags, state
+from api.tasks.upgrade import pipeline as upgrade_pipeline
 from fastapi.testclient import TestClient
 
 
@@ -255,6 +256,59 @@ def test_check_commit_channel_populates_latest_commit_sha(
     body = client.post("/api/upgrade/check").json()
     assert body["latest_version"] == "0.4.0"
     assert body["latest_commit_sha"] == head
+
+
+def test_check_invalidates_stale_snapshot_after_out_of_band_deploy(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_version = "0.3.0-commit.1111111"
+    current_version = "0.3.0-commit.2222222"
+
+    def _seed(row: state.UpgradeState) -> None:
+        row.running_version = old_version
+        row.running_sha = "1" * 40
+        row.state = state.STATE_SUCCEEDED
+        row.target_version = old_version
+        row.target_sha = "1" * 40
+        row.job_id = "old-job"
+        row.phase_detail = f"new revision running v{old_version}"
+        row.phase_progress = 100
+        row.current_images_json = (
+            '{"api":"acr.azurecr.io/elb-api:v0.3.0-commit.1111111"}'
+        )
+        row.rollback_target_json = (
+            '{"api":"acr.azurecr.io/elb-api:v0.3.0-commit.0000000"}'
+        )
+
+    state.update_state(_seed)
+    monkeypatch.setattr(upgrade_pipeline._api, "__version__", current_version)
+    monkeypatch.setenv(
+        remote_tags.UPGRADE_GIT_REMOTE_ENV, "https://example.test/foo.git"
+    )
+    monkeypatch.setattr(
+        "api.services.upgrade.remote_tags.fetch_release_tags",
+        lambda _url: [
+            remote_tags.RemoteTag(
+                name="0.3.0", raw_ref="refs/tags/v0.3.0", commit_sha="2" * 40
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "api.services.upgrade.remote_tags.fetch_branch_head",
+        lambda _url, *, branch="main": "3" * 40,
+    )
+
+    body = client.post("/api/upgrade/check").json()
+
+    assert body["running_version"] == current_version
+    assert body["running_sha"] == "2222222"
+    assert body["state"] == state.STATE_IDLE
+    assert body["current_images"] == {}
+    assert body["rollback_target"] == {}
+    assert body["target_version"] == ""
+    assert body["target_sha"] == ""
+    assert body["job_id"] == ""
+    assert body["phase_detail"] == "out-of-band deployment detected"
 
 
 def test_check_commit_channel_survives_branch_head_failure(
