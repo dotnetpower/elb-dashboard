@@ -58,6 +58,7 @@ export function UpgradePage() {
   const { toast } = useToast();
 
   const refreshAll = useCallback(async () => {
+    setActionError(null);
     setRefreshing(true);
     try {
       const [s, c, h] = await Promise.all([
