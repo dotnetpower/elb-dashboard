@@ -134,11 +134,15 @@ export function UpgradePage() {
   }, [refreshAll]);
 
   const phase = status ? statePhase(status.state) : "idle";
-  const upgradeBusy = submitting || phase === "active";
   const acrBuildAccessFailure = Boolean(
     status?.state === "failed_pre" &&
       /ACR build access|az acr build/i.test(status.phase_detail || ""),
   );
+  const progress = Math.max(0, Math.min(100, status?.phase_progress ?? 0));
+  const phaseDetail =
+    status?.phase_detail === "out-of-band deployment detected"
+      ? "Deployment state reconciled with the currently running revision."
+      : status?.phase_detail || "idle";
   // During the blue/green confirm window, rollback is an instant traffic
   // flip back to the still-warm blue revision — no ACR pull, so the ACR
   // pre-flight gate below does not apply.
@@ -424,8 +428,28 @@ export function UpgradePage() {
           </p>
         )}
         <p className="muted" style={{ margin: 0 }}>
-          {status.phase_detail || "idle"}
+          {phaseDetail}
         </p>
+        {phase === "active" && (
+          <div
+            role="progressbar"
+            aria-label="Upgrade progress"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={progress}
+            style={{ display: "grid", gap: 6 }}
+          >
+            <div className="prog" style={{ height: 6 }}>
+              <div
+                className="prog-f"
+                style={{ width: `${progress}%`, background: "var(--accent)" }}
+              />
+            </div>
+            <span className="muted" style={{ fontSize: 11, textAlign: "right" }}>
+              {progress}%
+            </span>
+          </div>
+        )}
         {acrBuildAccessFailure && (
           <div
             role="alert"
@@ -446,7 +470,21 @@ export function UpgradePage() {
 
       <section className="glass-card" style={cardStack}>
         <h3 style={{ margin: 0 }}>Start an upgrade</h3>
-        {candidates?.configured === false ? (
+        {phase === "active" ? (
+          <div role="status" style={{ display: "grid", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <Loader2 size={15} className="spin" />
+              <strong style={{ flex: 1 }}>
+                Installing {status.target_version ? `v${status.target_version}` : "selected target"}
+              </strong>
+              <span className="muted tabular-nums">{progress}%</span>
+            </div>
+            <p className="muted" style={{ margin: 0 }}>
+              Target selection is locked while this upgrade is active. Build logs below
+              refresh automatically; this page can remain open through the revision swap.
+            </p>
+          </div>
+        ) : candidates?.configured === false ? (
           <p className="muted">
             Set <code>UPGRADE_GIT_REMOTE</code> on the Container App to enable upgrades.
           </p>
@@ -466,7 +504,7 @@ export function UpgradePage() {
                 className="glass-input"
                 value={pickedTarget}
                 onChange={(e) => setPickedTarget(e.target.value)}
-                disabled={upgradeBusy}
+                disabled={submitting}
                 style={{ flex: 1, minWidth: 220 }}
               >
                 <option value="">— pick a version —</option>
@@ -513,7 +551,7 @@ export function UpgradePage() {
                 type="checkbox"
                 checked={confirmDowntime}
                 onChange={(e) => setConfirmDowntime(e.target.checked)}
-                disabled={upgradeBusy}
+                disabled={submitting}
               />
               <span>
                 I accept a short downtime (≈ 1 minute) while the new revision boots.
@@ -559,30 +597,19 @@ export function UpgradePage() {
               className="glass-button glass-button--primary"
               disabled={
                 submitting ||
-                phase === "active" ||
                 !pickedTarget ||
                 !confirmDowntime ||
                 (isMajorBump && !confirmBreaking)
               }
               onClick={() => void startUpgrade()}
             >
-              {upgradeBusy ? (
+              {submitting ? (
                 <Loader2 size={14} className="spin" />
               ) : (
                 <ArrowUpCircle size={14} strokeWidth={1.6} />
               )}{" "}
-              {submitting
-                ? "Starting…"
-                : phase === "active"
-                  ? "Upgrade in progress"
-                  : "Start upgrade"}
+              {submitting ? "Starting…" : "Start upgrade"}
             </button>
-            {phase === "active" && (
-              <p className="muted" style={{ margin: 0 }}>
-                An upgrade is already in progress; wait for it to finish before
-                starting another.
-              </p>
-            )}
             {phase === "succeeded" && (
               <p className="muted" style={{ margin: 0 }}>
                 The last upgrade succeeded. You can start another whenever a newer

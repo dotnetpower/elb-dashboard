@@ -22,7 +22,7 @@ In-app self-upgrade now opens one bounded ACR build-access lease before the firs
 The Upgrade page now:
 
 - animates Refresh, Check remote, Start upgrade, and build-log refresh busy states;
-- locks target and downtime controls while an upgrade is active;
+- replaces target controls with a dedicated active-upgrade summary and determinate progress bar while an upgrade is running;
 - explains ACR build-access failures and confirms that no image update was applied; and
 - clears stale current/rollback snapshots when remote discovery detects a terminal row from an out-of-band deployment.
 
