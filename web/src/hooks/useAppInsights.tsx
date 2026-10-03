@@ -44,7 +44,7 @@ interface AppInsightsContextValue {
   deploymentStatusResolved: boolean;
   /** Re-read deployment telemetry state after an apply or clear task. */
   refreshDeploymentStatus: () => void;
-  /** Active connection string (masked at UI render time). */
+  /** Effective connection string, even when browser telemetry is disabled. */
   connectionString: string;
   /** "user" / "deployment" / "none". */
   source: "user" | "deployment" | "none";
@@ -219,7 +219,7 @@ export function AppInsightsProvider({ children }: { children: ReactNode }) {
         deploymentConfigured,
         deploymentStatusResolved,
         refreshDeploymentStatus,
-        connectionString: "",
+        connectionString: effective,
         source,
         trackPageView: noop,
         trackException: noop,

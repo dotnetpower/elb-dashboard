@@ -385,7 +385,7 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
             onClick={handleDiscover}
             disabled={discovering}
           >
-            {discovering ? <Loader2 size={13} /> : <RefreshCw size={13} />} Discover
+            {discovering ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Discover
             namespaces
           </button>
         </Field>
@@ -439,10 +439,10 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
             onClick={handleTest}
             disabled={testing || !cfg.namespace_fqdn}
           >
-            {testing ? <Loader2 size={13} /> : <Plug size={13} />} Test connection
+            {testing ? <Loader2 size={13} className="spin" /> : <Plug size={13} />} Test connection
           </button>
           <button style={buttonStyle} onClick={() => void load()} disabled={loading}>
-            <RefreshCw size={13} /> Refresh
+            <RefreshCw size={13} className={loading ? "spin" : undefined} /> Refresh
           </button>
         </div>
         {testResult && <StatusLine kind="info">{testResult}</StatusLine>}
@@ -558,7 +558,7 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
           onClick={handleSave}
           disabled={saving}
         >
-          {saving ? <Loader2 size={13} /> : null} Save
+          {saving ? <Loader2 size={13} className="spin" /> : null} Save
         </button>
       </div>
 

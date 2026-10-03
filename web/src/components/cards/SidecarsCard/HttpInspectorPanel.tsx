@@ -218,9 +218,7 @@ export function HttpInspectorPanel() {
         >
           <RefreshCw
             size={11}
-            style={{
-              animation: loading ? "spin 1s linear infinite" : "none",
-            }}
+            className={loading ? "spin" : undefined}
           />
           Refresh
         </button>
@@ -273,8 +271,6 @@ export function HttpInspectorPanel() {
           transient api-sidecar timeout should degrade to a stale snapshot with
           a banner, not blank the whole inspector. */}
       {data.length > 0 && <VariantA data={data} />}
-
-      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 }

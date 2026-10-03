@@ -196,6 +196,6 @@ export function Badge({ tone, icon, children }: { tone: "success" | "muted" | "w
 }
 
 export function StatusLine({ kind, children }: { kind: "info" | "success" | "error" | "loading"; children: React.ReactNode }) {
-  const icon = kind === "success" ? <CheckCircle2 size={13} color="var(--success)" /> : kind === "error" ? <AlertCircle size={13} color="var(--danger)" /> : kind === "loading" ? <Loader2 size={13} /> : <Activity size={13} />;
+  const icon = kind === "success" ? <CheckCircle2 size={13} color="var(--success)" /> : kind === "error" ? <AlertCircle size={13} color="var(--danger)" /> : kind === "loading" ? <Loader2 size={13} className="spin" /> : <Activity size={13} />;
   return <div style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5, marginTop: 4 }}><span style={{ marginTop: 1 }}>{icon}</span><span style={{ wordBreak: "break-word", whiteSpace: "pre-wrap" }}>{children}</span></div>;
 }

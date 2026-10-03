@@ -1111,9 +1111,13 @@ export function ServiceBusPlayground() {
               type="button"
               className="glass-button"
               onClick={() => void observed.refetch()}
+              disabled={observed.isFetching}
               title="Refresh observed completions"
             >
-              <RefreshCw size={13} />
+              <RefreshCw
+                size={13}
+                className={observed.isFetching ? "spin" : undefined}
+              />
             </button>
           </div>
 

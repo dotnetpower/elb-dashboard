@@ -316,7 +316,8 @@ export function OpenApiManifestDiagnostic({
         onClick={onRetry}
         disabled={retrying}
       >
-        <RefreshCw size={12} /> {retrying ? "Refreshing…" : "Refresh"}
+        <RefreshCw size={12} className={retrying ? "spin" : undefined} />{" "}
+        {retrying ? "Refreshing…" : "Refresh"}
       </button>
     </PanelState>
   );

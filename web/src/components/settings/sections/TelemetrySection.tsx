@@ -80,6 +80,8 @@ export function TelemetrySection({ config }: { config: ResourceConfig | null }) 
   const userKeyTail = extractInstrumentationKeyTail(userConnectionString);
   const isWellFormedUserString = isWellFormedConnectionString(userConnectionString);
   const hasConnectionStringSomewhere = ai.active || isWellFormedUserString || ai.deploymentConfigured;
+  const deploymentKeyTail =
+    ai.source === "deployment" ? extractInstrumentationKeyTail(ai.connectionString) : "";
 
   usePollTask(task, setTask, (status) => {
     if (status.status !== "SUCCESS") return;
@@ -280,6 +282,7 @@ export function TelemetrySection({ config }: { config: ResourceConfig | null }) 
   const sourceDescriptor = describeBrowserConnectionSource(
     ai.source,
     isWellFormedUserString,
+    deploymentKeyTail,
   );
   const serverDescriptor = describeServerTelemetry(
     ai.deploymentConfigured,
@@ -398,6 +401,13 @@ export function TelemetrySection({ config }: { config: ResourceConfig | null }) 
           {userConnectionString.length > 0 && !isWellFormedUserString && (
             <StatusLine kind="info">
               Waiting for a complete value — the apply button stays disabled until both fields are present.
+            </StatusLine>
+          )}
+          {userConnectionString.length === 0 && ai.deploymentConfigured && (
+            <StatusLine kind="info">
+              The deployment connection remains configured
+              {deploymentKeyTail ? ` (InstrumentationKey ending in ${deploymentKeyTail})` : ""}
+              . This field is blank because no browser override is stored on this device.
             </StatusLine>
           )}
           {copyMessage && <StatusLine kind="info">{copyMessage}</StatusLine>}

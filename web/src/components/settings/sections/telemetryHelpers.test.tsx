@@ -8,9 +8,10 @@ import {
 
 describe("telemetry display state", () => {
   it("describes a deployment connection without implying that server telemetry is idle", () => {
-    expect(describeBrowserConnectionSource("deployment", false)).toMatchObject({
+    expect(describeBrowserConnectionSource("deployment", false, "1234abcd")).toMatchObject({
       label: "Deployment connection",
       tone: "success",
+      hint: expect.stringContaining("1234abcd"),
     });
   });
 

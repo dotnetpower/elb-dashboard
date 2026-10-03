@@ -1651,10 +1651,11 @@ textarea.form-input {
   animation: spin 1s linear infinite;
 }
 
-/* An in-progress spinner is an essential state cue rather than decorative
-  motion. Keep it moving more slowly when reduced motion is requested. */
+/* Every `.spin` usage represents active work rather than decorative motion.
+   Keep that state cue moving more slowly when reduced motion is requested;
+   otherwise the global accessibility guard below collapses it to one frame. */
 @media (prefers-reduced-motion: reduce) {
-  .spin.spin-essential {
+  .spin {
     animation: spin 2s linear infinite !important;
   }
 }
@@ -8072,6 +8073,104 @@ select.terminal-cockpit__cfg-input {
   .form-grid--cols-3,
   .form-grid--cols-2 {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Settings uses a left section rail on desktop and a horizontal section rail
+   on narrow screens so the active panel never collapses below its controls. */
+.settings-panel {
+  width: min(720px, calc(100vw - 24px));
+  display: grid;
+  grid-template-rows: 56px minmax(0, 1fr) 60px;
+  border-left: 1px solid var(--border-medium);
+}
+
+.settings-panel__body {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.settings-panel__nav {
+  border-right: 1px solid var(--border-weak);
+  padding: 12px 8px;
+  overflow-y: auto;
+}
+
+.settings-panel__nav-button {
+  width: 100%;
+}
+
+.settings-panel__content {
+  min-width: 0;
+  padding: 20px 24px;
+  overflow-y: auto;
+}
+
+.settings-panel__footer {
+  padding: 12px 20px;
+  border-top: 1px solid var(--border-weak);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-panel__footer-meta {
+  color: var(--text-faint);
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settings-panel__storage-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .settings-panel {
+    width: 100vw;
+    border-left: 0;
+    grid-template-rows: 52px minmax(0, 1fr) 52px;
+  }
+
+  .settings-panel__body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .settings-panel__nav {
+    display: flex;
+    gap: 4px;
+    padding: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-weak);
+  }
+
+  .settings-panel__nav-button {
+    width: auto;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .settings-panel__content {
+    padding: 16px;
+    overflow-x: hidden;
+  }
+
+  .settings-panel__footer {
+    padding: 8px 12px;
+  }
+
+  .settings-panel__storage-note {
+    display: none;
   }
 }
 

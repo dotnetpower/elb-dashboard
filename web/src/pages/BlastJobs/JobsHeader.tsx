@@ -95,7 +95,12 @@ export function JobsHeader({
           onClick={() => jobsQuery.refetch()}
           disabled={jobsQuery.isFetching}
         >
-          <RefreshCw size={14} strokeWidth={1.5} /> Refresh
+          <RefreshCw
+            size={14}
+            strokeWidth={1.5}
+            className={jobsQuery.isFetching ? "spin" : undefined}
+          />{" "}
+          Refresh
         </button>
       </div>
     </header>

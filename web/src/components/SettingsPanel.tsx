@@ -156,19 +156,16 @@ export function SettingsPanel({ open, onClose, initialSection }: Props) {
         role="dialog"
         aria-modal="true"
         aria-label="Settings"
+        className="settings-panel"
         ref={trapRef}
         style={{
           position: "fixed",
           top: 0,
           right: 0,
           bottom: 0,
-          width: "min(720px, calc(100vw - 24px))",
           background: "var(--bg-primary)",
-          borderLeft: "1px solid var(--border-medium)",
           boxShadow: "-12px 0 40px rgba(0,0,0,0.45)",
           zIndex: 60,
-          display: "grid",
-          gridTemplateRows: "56px 1fr 60px",
         }}
       >
         <header
@@ -188,10 +185,10 @@ export function SettingsPanel({ open, onClose, initialSection }: Props) {
           </IconButton>
         </header>
 
-        <div style={{ display: "grid", gridTemplateColumns: "180px 1fr", minHeight: 0 }}>
+        <div className="settings-panel__body">
           <nav
             aria-label="Settings sections"
-            style={{ borderRight: "1px solid var(--border-weak)", padding: "12px 8px" }}
+            className="settings-panel__nav"
           >
             {SECTIONS.map((section) => {
               const selected = section.id === active;
@@ -201,8 +198,8 @@ export function SettingsPanel({ open, onClose, initialSection }: Props) {
                   key={section.id}
                   onClick={() => setActive(section.id)}
                   aria-current={selected ? "page" : undefined}
+                  className="settings-panel__nav-button"
                   style={{
-                    width: "100%",
                     display: "flex",
                     alignItems: "center",
                     gap: 8,
@@ -239,7 +236,7 @@ export function SettingsPanel({ open, onClose, initialSection }: Props) {
             })}
           </nav>
 
-          <main style={{ padding: "20px 24px", overflowY: "auto" }}>
+          <main className="settings-panel__content">
             {active === "appearance" && <AppearanceSection />}
             {active === "preview" && <PreviewSection />}
             {active === "updates" && <UpdatesSection onClose={onClose} />}
@@ -258,24 +255,18 @@ export function SettingsPanel({ open, onClose, initialSection }: Props) {
         </div>
 
         <footer
-          style={{
-            padding: "12px 20px",
-            borderTop: "1px solid var(--border-weak)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-          }}
+          className="settings-panel__footer"
         >
-          <span style={{ color: "var(--text-faint)", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 8 }}>
+          <span className="settings-panel__footer-meta">
             <span
               title={`Release: v${__APP_VERSION__}\nBuild: v${formatBuildVersion(__APP_VERSION__, __APP_BUILD_NUMBER__)}\nCommit: ${__APP_COMMIT__}`}
               style={{ color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}
             >
               v{formatBuildVersion(__APP_VERSION__, __APP_BUILD_NUMBER__)} · {__APP_COMMIT__}
             </span>
-            <span style={{ opacity: 0.5 }}>·</span>
-            Stored locally · <code>elb-prefs</code>
+            <span className="settings-panel__storage-note">
+              <span style={{ opacity: 0.5 }}>·</span> Stored locally · <code>elb-prefs</code>
+            </span>
           </span>
           {showFooterActions && (
             <div style={{ display: "flex", gap: 8 }}>

@@ -26,6 +26,7 @@ export function extractInstrumentationKeyTail(value: string): string {
 export function describeBrowserConnectionSource(
   source: "user" | "deployment" | "none",
   userConnectionStringValid: boolean,
+  deploymentKeyTail = "",
 ): {
   label: string;
   hint: string;
@@ -51,7 +52,9 @@ export function describeBrowserConnectionSource(
   if (source === "deployment") {
     return {
       label: "Deployment connection",
-      hint: "This browser can use the connection string supplied by the deployment.",
+      hint: deploymentKeyTail
+        ? `This browser can use the deployment connection (InstrumentationKey ending in ${deploymentKeyTail}).`
+        : "This browser can use the connection string supplied by the deployment.",
       tone: "success",
       icon: <CheckCircle2 size={11} strokeWidth={2} />,
     };
