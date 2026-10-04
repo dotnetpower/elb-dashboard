@@ -15,6 +15,8 @@ A live commit-channel self-upgrade reached `az acr build` but the Microsoft-mana
 
 The same live review found two presentation gaps: refresh and start controls did not show busy motion, and an out-of-band deployment left the persisted image/rollback snapshot looking current even though it described an older self-upgrade.
 
+A second live update exposed a rollout-state defect: a transient ARM visibility gap in the revision health probe was treated as healthy. The row reached `succeeded` while the target image was configured but the new revision's containers were still `Waiting` and ingress still served the previous revision.
+
 ## User-Facing Change
 
 In-app self-upgrade now opens one bounded ACR build-access lease before the first sidecar build and restores the private network posture after the final build or any build failure. A failed open or restore is terminal: the pipeline remains `failed_pre` and never patches Container App images. The scheduled private-network reconciler remains the fail-safe if a worker disappears while access is open.
@@ -27,11 +29,14 @@ The Upgrade page now:
 - explains ACR build-access failures and confirms that no image update was applied; and
 - clears stale current/rollback snapshots when remote discovery detects a terminal row from an out-of-band deployment.
 
+The reconciler now treats a failed revision health probe as bounded `booting` state at 95% rather than success. Image identity remains necessary, but readiness must also be positively observed before `succeeded` is written.
+
 ## API / IaC Diff Summary
 
 - Reused `api.services.acr_build_access.open_build_access` and `restore_build_access`; no new network-policy implementation was introduced.
 - Preserved existing upgrade state names and HTTP schemas.
 - Added fail-closed tests for lease open failure, restore failure, and successful restore-before-PATCH ordering.
+- Added a readiness-gate regression test proving that a transient health-probe failure remains `rolling_out`.
 - No RBAC assignment, Bicep resource, Storage network rule, or browser credential flow changed.
 
 ## Validation Evidence
@@ -40,8 +45,8 @@ The Upgrade page now:
 - Post-failure posture: ACR `publicNetworkAccess=Disabled`, `defaultAction=Deny`, `bypass=AzureServices`, active builds `0`.
 - Focused ACR lease tests passed: 3.
 - Upgrade route stale-snapshot test passed.
-- Upgrade/ACR regression suite passed: 141 tests.
-- Full backend suite passed: 6,021 tests with 4 fixture-dependent skips.
+- Upgrade/ACR regression suite passed: 142 tests.
+- Full backend suite passed: 6,022 tests with 4 fixture-dependent skips.
 - Full frontend suite passed: 1,058 tests across 121 files.
 - Ruff, ESLint, mypy debt ratchet, and frontend production build passed.
 - The 242-operation OpenAPI contract and generated TypeScript API types were unchanged.

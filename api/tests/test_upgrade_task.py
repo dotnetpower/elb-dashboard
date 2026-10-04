@@ -898,6 +898,37 @@ def test_reconciler_succeeds_on_image_match_when_version_lags(
     assert "v0.3.0" in after.phase_detail
 
 
+def test_reconciler_health_probe_failure_stays_rolling_out(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _ProbeFailureAca(_FakeAca):
+        def latest_revision_name(self) -> str:
+            raise aca_template.TemplateError("revision not visible yet")
+
+    after_start = _start()
+    aca = _ProbeFailureAca()
+    upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_FakeRunner(),
+        aca=aca,
+    )
+    import api
+
+    monkeypatch.setattr(api, "__version__", "0.2.1")
+
+    after = upgrade_task.reconcile_rolling_out_inline(
+        aca=aca,
+        watcher=_FakeWatcher(running="Activating", provisioning="InProgress"),
+    )
+
+    assert after.state == state.STATE_ROLLING_OUT
+    assert after.phase_progress == 95
+    assert "awaiting readiness" in after.phase_detail
+
+
 def test_reconciler_rolling_out_budget_anchored_to_patch_not_start(
     env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

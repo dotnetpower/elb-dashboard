@@ -301,17 +301,19 @@ def reconcile_rolling_out_inline(
         # `failed_rollout` instead of being masked by the success branch — the
         # image/version match only says "the right image is deployed", not
         # "it is healthy". `_green_health` returns healthy | booting | failed.
-        health = "healthy"
+        health = "booting"
         health_status = None
         try:
             latest = aca_mod.latest_revision_name()
             health_status = watcher_mod.revision_status(latest)
             health = _green_health(health_status)
         except aca_template.TemplateError as exc:
-            # Open-fail: a transient ARM glitch should not block forever; the
-            # stuck-guard below remains the upper bound.
+            # A transient ARM visibility gap is common immediately after PATCH,
+            # but an image match alone does not prove the new revision is ready
+            # or serving traffic. Keep the row in bounded booting state; the
+            # stuck guard below remains the upper bound.
             LOGGER.warning(
-                "upgrade.reconcile: health probe failed (%s); assuming healthy",
+                "upgrade.reconcile: health probe failed (%s); awaiting readiness",
                 exc,
             )
         LOGGER.info(
